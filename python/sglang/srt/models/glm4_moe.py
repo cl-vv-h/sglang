@@ -55,7 +55,7 @@ from sglang.srt.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.moe import (
     get_moe_a2a_backend,
     should_skip_post_experts_all_reduce,
@@ -84,7 +84,13 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_nextn import DeepseekV3ForCausalLMNextN
 from sglang.srt.models.deepseek_v2 import DeepseekV2ForCausalLM
 from sglang.srt.models.utils import WeightsMapper, apply_qk_norm
-from sglang.srt.runtime_context import get_exec, get_forward, get_parallel, get_stream
+from sglang.srt.runtime_context import (
+    get_exec,
+    get_forward,
+    get_model,
+    get_parallel,
+    get_stream,
+)
 from sglang.srt.utils import (
     add_prefix,
     cpu_has_amx_support,
@@ -1446,6 +1452,208 @@ class Glm4MoeForCausalLM(nn.Module):
 
 class GlmMoeDsaForCausalLM(DeepseekV2ForCausalLM):
     fused_shared_experts_architecture = "GlmMoeDsaForCausalLM"
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        # Always construct the native model. Prefill and all non-decode modes
+        # continue to use the original SGLang implementation.
+        super().__init__(config, quant_config, prefix)
+
+        self._use_megakernel = (
+            getattr(get_model(), "model_execution_backend", "native") == "megakernel"
+        )
+        self._sglang_weights_loaded = False
+        self._megakernel_runtime_initialized = False
+        self._megakernel_initialized = False
+        self._megakernel_model = None
+        self._megakernel_weight_dict = None
+
+    def _build_megakernel_model_args(self, model_args_cls):
+        """Build MegaKernel args from the model's actual HF configuration."""
+        from dataclasses import fields, is_dataclass, replace
+
+        model_args = model_args_cls()
+        aliases = {
+            "ffn_hidden_size": "intermediate_size",
+            "max_seq_len": "max_position_embeddings",
+            "moe_ffn_hidden_size": "moe_intermediate_size",
+            "n_layers": "num_hidden_layers",
+            "num_experts": "n_routed_experts",
+            "num_heads": "num_attention_heads",
+            "num_kv_heads": "num_key_value_heads",
+            "num_layers": "num_hidden_layers",
+            "top_k": "num_experts_per_tok",
+        }
+
+        if is_dataclass(model_args):
+            arg_names = [field.name for field in fields(model_args)]
+        else:
+            arg_names = list(vars(model_args))
+
+        updates = {}
+        for arg_name in arg_names:
+            config_name = aliases.get(arg_name, arg_name)
+            if hasattr(self.config, config_name):
+                value = getattr(self.config, config_name)
+                if value is not None:
+                    updates[arg_name] = value
+
+        if is_dataclass(model_args):
+            try:
+                model_args = replace(model_args, **updates)
+            except TypeError:
+                for name, value in updates.items():
+                    setattr(model_args, name, value)
+        else:
+            for name, value in updates.items():
+                setattr(model_args, name, value)
+
+        logger.info(
+            "Built GLM-5.2 MegaKernel model args from SGLang config: "
+            "num_hidden_layers=%s, hidden_size=%s, intermediate_size=%s, "
+            "moe_intermediate_size=%s.",
+            getattr(self.config, "num_hidden_layers", None),
+            getattr(self.config, "hidden_size", None),
+            getattr(self.config, "intermediate_size", None),
+            getattr(self.config, "moe_intermediate_size", None),
+        )
+        return model_args
+
+    def _collect_megakernel_weights(self) -> Dict[str, torch.Tensor]:
+        # Quantization may store finalized tensors as Parameters or persistent
+        # Buffers, so named_parameters() alone is insufficient.
+        return {
+            name: tensor
+            for name, tensor in self.state_dict(keep_vars=True).items()
+            if not name.startswith("_megakernel_model.")
+        }
+
+    def load_weights(
+        self,
+        weights: Iterable[Tuple[str, torch.Tensor]],
+        is_nextn: bool = False,
+    ):
+        result = super().load_weights(weights, is_nextn=is_nextn)
+
+        if self._use_megakernel and not is_nextn:
+            self._sglang_weights_loaded = True
+            self._megakernel_weight_dict = self._collect_megakernel_weights()
+            logger.info(
+                "Prepared %d rank-local SGLang parameters for GLM-5.2 MegaKernel.",
+                len(self._megakernel_weight_dict),
+            )
+
+        return result
+
+    def init_megakernel(self, weight_dict: Dict[str, torch.Tensor]) -> None:
+        import torch.distributed as dist
+        import torch_npu  # noqa: F401
+        from blockrt.dist.utils import init_shemm
+        from blockrt.models.glm_5_2.glm5_2 import Glm52MegaKernel
+        from blockrt.models.glm_5_2.model_args import ModelArgsGLM5
+
+        if not dist.is_available() or not dist.is_initialized():
+            raise RuntimeError(
+                "torch.distributed has not been initialized before init_megakernel()"
+            )
+
+        parallel = get_parallel()
+        tp_rank = int(parallel.tp_rank)
+        tp_size = int(parallel.tp_size)
+        torch.npu.set_device(torch.npu.current_device())
+
+        if not self._megakernel_runtime_initialized:
+            init_shemm(rank=tp_rank, world_size=tp_size)
+            self._megakernel_runtime_initialized = True
+
+        model_args = self._build_megakernel_model_args(ModelArgsGLM5)
+        self._megakernel_model = Glm52MegaKernel(
+            model_args,
+            weight_dict,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+        )
+        self._megakernel_initialized = True
+        logger.info(
+            "Initialized GLM-5.2 MegaKernel with %d rank-local SGLang "
+            "parameters (tp_rank=%d, tp_size=%d).",
+            len(weight_dict),
+            tp_rank,
+            tp_size,
+        )
+
+    @torch.no_grad()
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+    ) -> torch.Tensor:
+        if self._use_megakernel and forward_batch.forward_mode.is_decode():
+            return self.forward_megakernel(
+                input_ids,
+                positions,
+                forward_batch,
+                input_embeds,
+                pp_proxy_tensors,
+            )
+
+        return super().forward(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors,
+        )
+
+    @torch.no_grad()
+    def forward_megakernel(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors: Optional[PPProxyTensors] = None,
+    ) -> torch.Tensor:
+        if not forward_batch.forward_mode.is_decode():
+            raise RuntimeError(
+                "forward_megakernel() is restricted to ForwardMode.DECODE."
+            )
+        if not self._sglang_weights_loaded:
+            raise RuntimeError(
+                "MegaKernel decode was requested before SGLang finished "
+                "loading the GLM-5.2 weights."
+            )
+
+        if not self._megakernel_initialized:
+            self._megakernel_weight_dict = self._collect_megakernel_weights()
+            self.init_megakernel(self._megakernel_weight_dict)
+
+        forward_batch_info = None
+        intermediate_tensors = None
+
+        if input_ids.dtype != torch.int32:
+            input_ids = input_ids.to(dtype=torch.int32)
+        input_ids = input_ids.contiguous()
+
+        if positions.dtype != torch.int64:
+            positions = positions.to(dtype=torch.int64)
+        positions = positions.contiguous()
+
+        output = self._megakernel_model.forward(
+            forward_batch_info,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            input_embeds,
+        )
+        return LogitsProcessorOutput(next_token_logits=output)
 
 
 class GlmMoeDsaForCausalLMNextN(DeepseekV3ForCausalLMNextN):

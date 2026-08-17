@@ -616,6 +616,17 @@ class ServerArgs:
         ),
         NS("model"),
     ] = "auto"
+    model_execution_backend: A[
+        Literal["native", "megakernel"],
+        Arg(
+            help=(
+                "Select the model execution backend. 'native' preserves the "
+                "existing SGLang execution path. 'megakernel' enables the "
+                "experimental MegaKernel path for supported models."
+            )
+        ),
+        NS("model"),
+    ] = "native"
     model_config_parser: A[
         str,
         Arg(
