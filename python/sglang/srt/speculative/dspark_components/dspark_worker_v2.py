@@ -188,10 +188,29 @@ class DSparkWorkerV2(BaseSpecWorker):
                 "MoE-under-DP all-reduce."
             )
 
+        quarot_scope = nullcontext()
+        if (
+            _is_npu
+            and not self._draft_is_moe
+            and envs.SGLANG_NPU_GLM_DSPARK_QUAROT.get()
+        ):
+            from sglang.srt.hardware_backend.npu.dspark_quarot import (
+                build_glm_dspark_quarot_config,
+                glm_dspark_quarot_scope,
+            )
+
+            quarot_config = build_glm_dspark_quarot_config(
+                device=self.device,
+                mode=envs.SGLANG_NPU_GLM_DSPARK_QUAROT.get(),
+                target_model_config=target_worker.model_runner.model_config,
+                target_model=target_worker.model_runner.model,
+            )
+            quarot_scope = glm_dspark_quarot_scope(quarot_config)
+
         # Inside the draft scope the context answers the draft's narrowed rank.
         self._target_tp_rank = get_parallel().tp_rank
         load_group = get_pp_stage_load_group()
-        with draft_pp_context(), self._draft_context():
+        with draft_pp_context(), self._draft_context(), quarot_scope:
             bundle = build_draft_tp_worker(
                 server_args=server_args,
                 gpu_id=gpu_id,
