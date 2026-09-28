@@ -151,6 +151,13 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
             "TARGET_VERIFY": [],
         }
 
+    def _build_ragged_verify_token_buckets(self):
+        if not self.model_runner.attn_backend.supports_ragged_verify_graph:
+            raise ValueError(
+                "NPU DSpark compact graph requires a ragged target backend."
+            )
+        return super()._build_ragged_verify_token_buckets()
+
     def _create_device_graph(self):
         return torch.npu.NPUGraph()
 
@@ -226,7 +233,11 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
-        if forward_batch.needs_forward_metadata_init():
+        dspark_dsa_ragged = self.ragged_verify_mode and getattr(
+            self._replay_attn_backend(), "_dspark_dsa_ragged_verify", False
+        )
+        if dspark_dsa_ragged or forward_batch.needs_forward_metadata_init():
+            # Base load_batch also refreshes layouts for pre-planned batches.
             self.load_batch(forward_batch, pp_proxy_tensors)
         else:
             # In speculative decoding, these two fields are still needed.
@@ -326,7 +337,10 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
 
         graph_key = self._replay_graph_key
 
-        if not (
+        if dspark_dsa_ragged:
+            # DSA consumes device metadata updated in place by load_batch.
+            output = self.backend.replay(graph_key, forward_batch)
+        elif not (
             is_deepseek_dsa(self.model_runner.model_config.hf_config)
             or is_deepseek_v4(self.model_runner.model_config.hf_config)
         ):
