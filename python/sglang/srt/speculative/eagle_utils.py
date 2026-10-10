@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from enum import IntEnum
 from functools import partial
 from typing import TYPE_CHECKING, List, Optional, Tuple
@@ -942,7 +943,36 @@ def eagle_sample(
                 ),
             )  # (bs * num_draft_tokens, vocab_size)
             maybe_detect_nan(target_probs, "v2 verify: target_probs after top_k_renorm")
-        if sampling_info.need_top_p_sampling:
+        # Opt-in RN fast path for a single-child, target-only NPU tree.
+        # Request-level top-k filtering above remains supported and unchanged.
+        use_selected_row = (
+            _is_npu
+            and os.environ.get("SGL_KERNEL_NPU_SAMPLING_SELECTED_ROW", "0") == "1"
+            and os.environ.get("SGL_KERNEL_NPU_SAMPLING_TRITON", "1") == "1"
+            and os.environ.get("SGL_KERNEL_NPU_SAMPLING_TRITON_DIV", "native") == "rn"
+            and not use_rejection_sampling
+            and verify_input.tree_topk == 1
+            and sampling_info.need_top_p_sampling
+            and target_probs.dtype == torch.float32
+            and target_probs.is_contiguous()
+            and bs > 0
+            and 1 <= target_probs.shape[-1] <= 2**23
+        )
+        selected_top_ps = None
+        if use_selected_row:
+            from sgl_kernel_npu.sample.selected_row import (
+                top_p_tree_sampling_selected_row,
+            )
+
+            selected_top_ps = torch.repeat_interleave(
+                sampling_info.top_ps, verify_input.draft_token_num, dim=0
+            )
+            sampling_fn = partial(
+                top_p_tree_sampling_selected_row,
+                top_ps=selected_top_ps,
+                tree_topk=verify_input.tree_topk,
+            )
+        if sampling_info.need_top_p_sampling and not use_selected_row:
             target_probs = top_p_renorm_prob(
                 target_probs,
                 torch.repeat_interleave(
@@ -950,11 +980,16 @@ def eagle_sample(
                 ),
             )
             maybe_detect_nan(target_probs, "v2 verify: target_probs after top_p_renorm")
-        target_probs = target_probs.reshape(bs, verify_input.draft_token_num, -1)
+        if not use_selected_row:
+            target_probs = target_probs.reshape(bs, verify_input.draft_token_num, -1)
         draft_probs = (
-            verify_input.draft_probs
-            if use_rejection_sampling
-            else torch.zeros_like(target_probs)
+            None
+            if use_selected_row
+            else (
+                verify_input.draft_probs
+                if use_rejection_sampling
+                else torch.zeros_like(target_probs)
+            )
         )
         # Defense-in-depth behind the spec_hook startup allowlist: validate
         # the actual kernel inputs before the Triton kernel.
@@ -986,10 +1021,13 @@ def eagle_sample(
             uniform_samples=coins,
             uniform_samples_for_final_sampling=coins_for_final_sampling,
             target_probs=target_probs,
-            draft_probs=draft_probs,
+            **(
+                {}
+                if use_selected_row
+                else {"draft_probs": draft_probs, "deterministic": True}
+            ),
             threshold_single=get_spec().speculative_accept_threshold_single,
             threshold_acc=get_spec().speculative_accept_threshold_acc,
-            deterministic=True,
         )
         del (
             expanded_temperature,
@@ -997,6 +1035,7 @@ def eagle_sample(
             draft_probs,
             coins,
             coins_for_final_sampling,
+            selected_top_ps,
         )
 
         # Sync sampling results across TP ranks: different GPUs may
