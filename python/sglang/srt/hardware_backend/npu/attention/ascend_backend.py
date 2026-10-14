@@ -10,13 +10,17 @@ from sgl_kernel_npu.attention.sinks_attention import (
     attention_sinks_triton,
 )
 
-from sglang.srt.configs.model_config import AttentionArch
+from sglang.srt.configs.model_config import AttentionArch, is_glm_moe_dsa
 from sglang.srt.dllm.config import DllmConfig
 from sglang.srt.hardware_backend.npu.attention.ascend_torch_native_backend import (
     AscendTorchNativeAttnBackend,
 )
 from sglang.srt.hardware_backend.npu.attention.dsa_dcp import (
     forward_dcp_sparse_attention,
+)
+from sglang.srt.hardware_backend.npu.attention.dspark_compact import (
+    NpuCompactGraphMetadata,
+    build_compact_verify_metadata,
 )
 from sglang.srt.hardware_backend.npu.attention.mla_cache import gather_mla_cache_pages
 from sglang.srt.hardware_backend.npu.attention.mla_preprocess import (
@@ -332,6 +336,13 @@ class AscendAttnBackend(AttentionBackend):
             speculative_step_id + 1, device="npu"
         )
         self.page_size = model_runner.page_size
+        self._dspark_dsa_ragged_verify = (
+            is_glm_moe_dsa(model_runner.model_config.hf_config)
+            and model_runner.spec_algorithm.is_dspark()
+            and not model_runner.is_draft_worker
+        )
+        if self._dspark_dsa_ragged_verify:
+            self.supports_ragged_verify_graph = True
         self.model_dtype = model_runner.model_config.dtype
         self.kv_cache_dtype = model_runner.kv_cache_dtype
         self.use_mla = model_runner.model_config.attention_arch == AttentionArch.MLA
@@ -506,6 +517,10 @@ class AscendAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         in_capture: bool = False,
     ):
+        layout = self._glm_compact_layout(forward_batch)
+        if layout is not None:
+            self._init_compact_graph_metadata(forward_batch, layout)
+            return
         bs = forward_batch.batch_size
         if in_capture:
             self._init_cuda_graph_metadata(
@@ -529,9 +544,70 @@ class AscendAttnBackend(AttentionBackend):
             origin_out_cache_loc=getattr(forward_batch, "origin_out_cache_loc", None),
         )
 
+    def _glm_compact_layout(self, forward_batch):
+        if (
+            self._dspark_dsa_ragged_verify
+            and forward_batch.forward_mode.is_target_verify()
+        ):
+            return getattr(forward_batch.spec_info, "ragged_verify_layout", None)
+        return None
+
+    def _init_compact_graph_metadata(self, forward_batch, layout):
+        slots = forward_batch.batch_size
+        key = ("dspark", slots, layout.graph_num_tokens)
+        if key not in self.graph_metadata:
+            self.graph_metadata[key] = NpuCompactGraphMetadata(
+                num_slots=slots,
+                num_tokens=layout.graph_num_tokens,
+                table_width=(
+                    max(self.req_to_token.shape[1], layout.graph_num_tokens)
+                    + self.page_size
+                    - 1
+                )
+                // self.page_size,
+                device=self.device,
+            )
+        state = self.graph_metadata[key]
+        state.update(
+            prefix_lens=forward_batch.seq_lens,
+            req_pool_indices=forward_batch.req_pool_indices,
+            req_to_token=self.req_to_token,
+            verify_lens=layout.verify_lens,
+            page_size=self.page_size,
+        )
+        metadata = ForwardMetadata()
+        metadata.seq_lens = state.kv_lens
+        metadata.actual_seq_lengths_kv = state.kv_lens
+        metadata.actual_seq_lengths_q = state.query_ends
+        metadata.block_tables = state.block_tables
+        # No host mirror: indexer/sparse attention read device tensors directly.
+        self.forward_metadata = metadata
+        self.graph_mode = True
+
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Init the metadata for a forward pass."""
         self.forward_metadata = ForwardMetadata()
+        layout = self._glm_compact_layout(forward_batch)
+        if layout is not None:
+            compact = build_compact_verify_metadata(
+                prefix_lens=forward_batch.seq_lens,
+                layout=layout,
+                max_verify_len=int(forward_batch.spec_info.draft_token_num),
+                num_tokens=forward_batch.input_ids.numel(),
+            )
+            # Both the lightning indexer and sparse attention consume these
+            # device tensors. The caller's CPU mirror may already include Q.
+            self.forward_metadata.seq_lens = compact.kv_lens
+            self.forward_metadata.actual_seq_lengths_kv = compact.kv_lens
+            self.forward_metadata.actual_seq_lengths_q = compact.query_ends
+            self.forward_metadata.block_tables = (
+                self.req_to_token[forward_batch.req_pool_indices, : compact.max_kv_len][
+                    :, :: self.page_size
+                ]
+                // self.page_size
+            ).to(torch.int32)
+            self.graph_mode = False
+            return
         seq_lens_max = forward_batch.seq_lens.max()
         if forward_batch.forward_mode.is_target_verify():
             if (

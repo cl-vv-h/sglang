@@ -139,6 +139,7 @@ class TestDSparkQuaRotEmbeddingDispatch(CustomTestCase):
                     device=torch.device("cpu"),
                     decode_cuda_graph_runner=None,
                     forward=forward,
+                    kv_index_translator=None,
                 )
                 proposer.sample_from_anchor = True
                 proposer.gamma = proposer.query_token_num = 3
@@ -160,11 +161,14 @@ class TestDSparkQuaRotEmbeddingDispatch(CustomTestCase):
                             seq_lens_cpu=torch.tensor([5, 9]),
                             req_pool_indices=torch.tensor([0, 1]),
                             can_run_decode_cuda_graph=False,
+                            is_extend_in_batch=False,
+                            dp_spec_prefill_coordination_applied=False,
                         ),
                         draft_input=SimpleNamespace(bonus_tokens=torch.tensor([1, 2])),
                         verify_window=SimpleNamespace(
                             positions_2d=torch.tensor([[5, 6, 7], [9, 10, 11]]),
                             verify_cache_loc_2d=torch.arange(6).reshape(2, 3),
+                            kv_loc_plan=SimpleNamespace(bind=Mock()),
                         ),
                         bs=2,
                         device="cpu",

@@ -76,6 +76,7 @@ def _make_attention(head_dim, *, dtype=torch.float32, neox=True, scaling=1.0):
         )
     attn.attn = _CaptureAttention()
     attn.attention_sink_bias = None
+    attn.v_scale = None
     attn.use_table_qk_norm_rope = False
     return attn
 
@@ -262,7 +263,8 @@ class TestDFlashNpuQkNormRope(CustomTestCase):
                     )
                     self.assertEqual(attn.qkv_proj.calls, 1)
                     self.assertIs(call.args[0], attn.attn)
-                    torch.testing.assert_close(call.args[1], cache_loc)
+                    torch.testing.assert_close(call.args[1].loc, cache_loc)
+                    self.assertIsNone(call.args[1].swa_loc)
                     torch.testing.assert_close(
                         call.args[2], expected_k.reshape(3, attn.num_kv_heads, head_dim)
                     )

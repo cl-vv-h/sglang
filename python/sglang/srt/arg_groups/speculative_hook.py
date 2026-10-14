@@ -790,6 +790,14 @@ def _handle_dspark(server_args: ServerArgs) -> None:
     )
 
     ragged_mode = read_ragged_verify_mode()
+    if _is_npu and ragged_mode is RaggedVerifyMode.COMPACT:
+        from sglang.srt.configs.model_config import is_glm_moe_dsa
+        from sglang.srt.hardware_backend.npu.attention.dspark_compact import (
+            validate_npu_dspark_compact,
+        )
+
+        if is_glm_moe_dsa(model_config_of(server_args).hf_config):
+            validate_npu_dspark_compact(cfg, ragged_mode.value)
     if (
         cfg.speculative_dspark_align_verify_tokens_to_graph_tier
         and ragged_mode is not RaggedVerifyMode.COMPACT

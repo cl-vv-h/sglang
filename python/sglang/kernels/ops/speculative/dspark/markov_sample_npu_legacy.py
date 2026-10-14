@@ -6,11 +6,13 @@ guards for entirely masked (-inf) tiles during the online-max rescaling.
 The new branch keeps its bias projection, step-logit dtype, rejection sampling,
 confidence scheduling, and KV logic. Noise comes from the native NPU generator
 as in the older branch, rather than the new counter-based Philox implementation.
+On arch35, -log(uniform(1e-8, 1)) avoids exponential_'s capture-unsafe Philox call.
 Consequently sampled sequences need not be identical to the newer RNG path.
 
 Scope: one vocabulary shard per attention-DP rank, as in TP16/attention-DP16.
-Multi-rank vocabulary sampling is intentionally rejected rather than allowing
-unsynchronized native RNG draws on replicas of the gathered logits.
+Multi-shard Markov sampling is rejected. A dense GLM draft uses a full Markov
+vocabulary after gathering its TP LM-head logits; the caller's SpecTpSync
+synchronizes each sampled token before the next Markov step.
 """
 
 import logging
@@ -20,10 +22,22 @@ import torch
 import triton
 import triton.language as tl
 
+from sglang.srt.hardware_backend.npu.utils import is_npu_arch35
+
 _BLOCK_V = 1024
 _IDX_SENTINEL = tl.constexpr(2147483647)
 _reported = False
 logger = logging.getLogger(__name__)
+
+
+def _fill_exponential_noise(noise: torch.Tensor) -> None:
+    # A5 exponential_ uses philox_engine_inputs, which cannot run during NPU
+    # graph capture. Keep the same FP32 buffer and per-step native RNG draw;
+    # the bounded uniform transform changes the random sequence, not logits.
+    if is_npu_arch35():
+        noise.uniform_(1e-8, 1.0).log_().neg_()
+    else:
+        noise.exponential_(1.0)
 
 
 @triton.jit
@@ -228,10 +242,11 @@ def sample_markov_step_npu(
         exp_noise = torch.empty(
             step_logits.shape, dtype=torch.float32, device=value.device
         )
-        exp_noise.exponential_(1.0)
+        _fill_exponential_noise(exp_noise)
     if not _reported:
         logger.info(
-            "DSpark NPU sampler: legacy Triton selection + native exponential RNG; "
+            "DSpark NPU sampler: legacy Triton selection + native RNG "
+            "(arch35 uses -log(uniform)); "
             "score/token-ID buffers are separate float32/int32 tensors."
         )
         _reported = True

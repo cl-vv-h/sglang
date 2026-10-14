@@ -42,6 +42,7 @@ from sglang.srt.speculative.ragged_verify import (
     round_up_grid,
 )
 from sglang.srt.speculative.spec_tp_sync import SpecTpSync, SpecTpSyncSite
+from sglang.srt.utils import is_npu
 from sglang.srt.utils.common import require_mlp_tp_gather
 from sglang.srt.utils.invariants import (
     Bucket,
@@ -52,6 +53,7 @@ from sglang.srt.utils.invariants import (
 )
 
 logger = logging.getLogger(__name__)
+_is_npu = is_npu()
 
 # Scheduled verify lengths must not exceed the per-step token budget.
 _VERIFY_LEN_BUDGET = Invariant("dspark.verify_len_budget", Bucket.GUARD, IsTrue())
@@ -81,6 +83,9 @@ class DSparkVerifyPlanner:
         self.draft_model = draft_model
         self.gamma = gamma
         self.model_runner = model_runner
+        self._npu_glm_compact = _is_npu and getattr(
+            model_runner.attn_backend, "_dspark_dsa_ragged_verify", False
+        )
         self.device = device
         self.verify_num_draft_tokens = verify_num_draft_tokens
         self._tp_sync = tp_sync
@@ -261,6 +266,12 @@ class DSparkVerifyPlanner:
         draft_input.verify_token_budget = self._budget_from_resolved(
             resolved=resolved, req_pool_indices_cpu=batch.req_pool_indices_cpu
         )
+        if self._npu_glm_compact:
+            # Ring event readiness can differ across ranks. Never let that
+            # choose different token tiers / HCCL collective shapes.
+            draft_input.verify_token_budget = get_parallel().tp_group.broadcast_object(
+                draft_input.verify_token_budget, src=0
+            )
         batch.spec_verify_tier_num_tokens = local_verify_tier_num_tokens(
             bs=batch.batch_size(),
             verify_token_budget=draft_input.verify_token_budget,
@@ -294,6 +305,14 @@ class DSparkVerifyPlanner:
     def set_forced_budget_frac(self, frac) -> None:
         if self._budget_planner is not None:
             self._budget_planner.forced_budget_frac = frac
+            # SPS profiling starts without a fitted table. A forced budget must
+            # bypass the cached verify-all layout or every probe measures W.
+            if _is_npu:
+                self._is_verify_all = (
+                    self.is_compact_mode
+                    and frac is None
+                    and is_uninitialized_sps_table(self._budget_planner.sps_table)
+                )
 
     def compute_budget_sync(
         self,
@@ -313,9 +332,12 @@ class DSparkVerifyPlanner:
             confidence=confidence.to("cpu"),
             generation=generation,
         )
-        return self._budget_from_resolved(
+        budget = self._budget_from_resolved(
             resolved=resolved, req_pool_indices_cpu=req_pool_indices_cpu
         )
+        if self._npu_glm_compact:
+            budget = get_parallel().tp_group.broadcast_object(budget, src=0)
+        return budget
 
     def resolve_verify_token_budget(
         self,

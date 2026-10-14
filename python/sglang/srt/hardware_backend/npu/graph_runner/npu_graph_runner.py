@@ -238,7 +238,12 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
         forward_batch: ForwardBatch,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[LogitsProcessorOutput, PPProxyTensors]:
-        if forward_batch.needs_forward_metadata_init():
+        glm_compact = self.ragged_verify_mode and getattr(
+            self._replay_attn_backend(), "_dspark_dsa_ragged_verify", False
+        )
+        if glm_compact or forward_batch.needs_forward_metadata_init():
+            # Reuse the shared ragged layout staging, including its preplanned
+            # branch. GLM DSA then replays the device metadata prepared there.
             self.load_batch(forward_batch, pp_proxy_tensors)
         else:
             if not self.model_runner.spec_algorithm.is_dflash():

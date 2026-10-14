@@ -29,9 +29,9 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_loader.loader import DefaultModelLoader
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.models.dspark import DSparkDraftModel
-from sglang.srt.runtime_context import get_context
+from sglang.srt.runtime_context import get_context, reset_context
 from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
+from sglang.test.test_utils import CustomTestCase, publish_build_topology
 
 register_cpu_ci(est_time=12, suite="base-a-test-cpu")
 
@@ -112,7 +112,9 @@ class TestDSparkWeightLoading(CustomTestCase):
             distributed_init_method=f"file://{cls.group_dir.name}/gloo",
             backend="gloo",
         )
-        initialize_model_parallel(tensor_model_parallel_size=1, backend="gloo")
+        publish_build_topology(device="cpu", tp_size=1)
+        cls.addClassCleanup(reset_context)
+        initialize_model_parallel(backend="gloo")
 
     @classmethod
     def tearDownClass(cls):
@@ -209,9 +211,11 @@ class TestDSparkWeightLoading(CustomTestCase):
         expected = hidden @ head_before.T
         torch.testing.assert_close(logits, expected[:, :32], rtol=0, atol=0)
         previous = torch.tensor([1, 3])
-        corrected = model.markov_head.apply_step_logits(
-            logits, token_ids=previous, hidden_states=None
+        bias, state = model.markov_head.step_bias(
+            previous, hidden_states=None, state=None
         )
+        self.assertIsNone(state)
+        corrected = logits + bias
         expected_bias = (
             self.weights["markov_head.markov_w1.weight"][previous]
             @ self.weights["markov_head.markov_w2.weight"].T

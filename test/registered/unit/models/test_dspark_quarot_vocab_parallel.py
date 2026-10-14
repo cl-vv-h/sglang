@@ -33,10 +33,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.srt.models.dspark import DSparkDraftModel
-from sglang.srt.runtime_context import get_context, get_flags, get_parallel
+from sglang.srt.runtime_context import get_flags, get_parallel, reset_context
 from sglang.srt.speculative.spec_utils import draft_tp_context
 from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
+from sglang.test.test_utils import CustomTestCase, publish_build_topology
 
 register_cpu_ci(est_time=30, suite="base-a-test-cpu")
 
@@ -132,25 +132,21 @@ def _run_vocab_worker(rank, world_size, init_path):
     try:
         for dp_size in (1, 2) if world_size == 2 else (1,):
             dp_enabled = dp_size > 1
+            publish_build_topology(
+                world_rank=rank,
+                speculative_algorithm="DSpark",
+                device="cpu",
+                tp_size=world_size,
+                attn_dp_size=dp_size,
+            )
             with (
-                get_context().override_server_args(
-                    speculative_algorithm="DSpark",
-                    device="cpu",
-                    tp_size=world_size,
-                    dp_size=dp_size,
-                    enable_dp_attention=dp_enabled,
-                ),
                 get_flags().dp.override(enabled=dp_enabled),
                 envs.SGLANG_RAGGED_VERIFY_MODE.override("static"),
                 # These tests use tensor collectives, not the scheduler's
                 # shared-memory object-broadcast transport.
                 envs.SGLANG_USE_MESSAGE_QUEUE_BROADCASTER.override(False),
             ):
-                initialize_model_parallel(
-                    tensor_model_parallel_size=world_size,
-                    attention_data_parallel_size=dp_size,
-                    backend="gloo",
-                )
+                initialize_model_parallel(backend="gloo")
                 try:
                     for replicate in (False, True):
                         _check_vocab_case(
@@ -160,6 +156,7 @@ def _run_vocab_worker(rank, world_size, init_path):
                     destroy_model_parallel()
     finally:
         destroy_distributed_environment()
+        reset_context()
 
 
 class TestDSparkQuaRotVocabParallel(CustomTestCase):
