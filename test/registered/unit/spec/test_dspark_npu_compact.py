@@ -25,6 +25,7 @@ from sglang.kernels.ops.speculative.dspark.dspark_verify_window import (
 )
 from sglang.srt.hardware_backend.npu.attention import dspark_compact
 from sglang.srt.model_executor.forward_batch_info import ForwardMode
+from sglang.srt.runtime_context import get_parallel
 from sglang.srt.speculative.dspark_components import dspark_verify
 from sglang.srt.speculative.dspark_components.dspark_planner import (
     DSparkScheduleConfig,
@@ -78,7 +79,7 @@ def _backend_method(name="init_forward_metadata", **extra):
         np=np,
         ForwardMetadata=lambda: SimpleNamespace(seq_lens_cpu_int=None),
         build_compact_verify_metadata=dspark_compact.build_compact_verify_metadata,
-        get_parallel=lambda: SimpleNamespace(dcp_enabled=False),
+        get_parallel=lambda: SimpleNamespace(dcp_enabled=False, attn_dp_enabled=False),
     )
     namespace.update(extra)
     exec(compile(module, str(path), "exec"), namespace)
@@ -86,6 +87,46 @@ def _backend_method(name="init_forward_metadata", **extra):
 
 
 class TestNpuCompactMetadata(CustomTestCase):
+    def test_dp_eager_backend_uses_sink_metadata_for_idle_and_busy(self):
+        backend = SimpleNamespace(
+            graph_metadata={},
+            req_to_token=torch.arange(256).view(4, 64),
+            page_size=8,
+            device="cpu",
+            _dspark_dsa_ragged_verify=True,
+        )
+        backend._glm_compact_layout = MethodType(
+            _backend_method("_glm_compact_layout"), backend
+        )
+        backend._init_compact_graph_metadata = MethodType(
+            _backend_method(
+                "_init_compact_graph_metadata",
+                NpuCompactGraphMetadata=dspark_compact.NpuCompactGraphMetadata,
+            ),
+            backend,
+        )
+        init = _backend_method(
+            get_parallel=lambda: SimpleNamespace(attn_dp_enabled=True)
+        )
+        for lens, prefixes in (([0], [0]), ([1, 3], [7, 15])):
+            layout = RaggedVerifyLayout.from_verify_lens_device(
+                verify_lens=torch.tensor(lens), graph_num_tokens=8
+            )
+            batch = SimpleNamespace(
+                forward_mode=ForwardMode.TARGET_VERIFY,
+                batch_size=len(lens),
+                seq_lens=torch.tensor(prefixes),
+                req_pool_indices=torch.arange(len(lens)),
+                spec_info=SimpleNamespace(ragged_verify_layout=layout),
+            )
+            init(backend, batch)
+            metadata = backend.forward_metadata
+            expected_q = torch.tensor(lens).cumsum(0).tolist() + [8]
+            self.assertEqual(metadata.actual_seq_lengths_q.tolist(), expected_q)
+            self.assertFalse(metadata.block_tables[-1].any())
+            if lens == [0]:
+                self.assertFalse(metadata.block_tables.any())
+
     def test_compact_metadata_dispatch_is_glm_verify_only(self):
         layout = layout_for([1, 3])
         select = _backend_method("_glm_compact_layout")
@@ -278,18 +319,21 @@ class TestNpuCompactExecution(CustomTestCase):
         seen_lengths = []
 
         def prepare(verify_input, batch, target_worker):
-            return SimpleNamespace(
-                input_ids=verify_input.draft_token,
-                positions=verify_input.positions,
-                spec_info=verify_input,
-                forward_mode=ForwardMode.TARGET_VERIFY,
-                seq_lens=batch.seq_lens,
-                seq_lens_cpu=batch.seq_lens_cpu,
-                req_pool_indices=batch.req_pool_indices,
-                extend_seq_lens=None,
-                global_num_token_non_padded_cpu=verify_input.draft_token.numel(),
-                spec_algorithm=SimpleNamespace(is_dspark=lambda: True),
-            ), False
+            return (
+                SimpleNamespace(
+                    input_ids=verify_input.draft_token,
+                    positions=verify_input.positions,
+                    spec_info=verify_input,
+                    forward_mode=ForwardMode.TARGET_VERIFY,
+                    seq_lens=batch.seq_lens,
+                    seq_lens_cpu=batch.seq_lens_cpu,
+                    req_pool_indices=batch.req_pool_indices,
+                    extend_seq_lens=None,
+                    global_num_token_non_padded_cpu=verify_input.draft_token.numel(),
+                    spec_algorithm=SimpleNamespace(is_dspark=lambda: True),
+                ),
+                False,
+            )
 
         def target_forward(*, batch, forward_batch, is_verify, skip_attn_backend_init):
             self.assertTrue(is_verify)
@@ -337,6 +381,7 @@ class TestNpuCompactExecution(CustomTestCase):
             )
             original_cpu = batch.seq_lens_cpu
             with (
+                get_parallel().override(attn_dp_enabled=False),
                 patch.object(dspark_verify, "_is_npu", True),
                 patch.object(
                     dspark_verify.DFlashVerifyInput, "prepare_for_verify", prepare
@@ -620,6 +665,8 @@ class TestNpuCompactConfiguration(CustomTestCase):
             ),
             disable_overlap_schedule=True,
             attn_dp_size=1,
+            enable_dp_lm_head=False,
+            speculative_skip_dp_mlp_sync=False,
             dp_size=1,
             tp_size=32,
             attn_cp_size=1,
@@ -640,11 +687,24 @@ class TestNpuCompactConfiguration(CustomTestCase):
         dspark_compact.validate_npu_dspark_compact(
             self.config(disable_cuda_graph=False), "compact"
         )
+        for backend in ("disabled", "full"):
+            dspark_compact.validate_npu_dspark_compact(
+                self.config(
+                    attn_dp_size=4, enable_dp_lm_head=True, decode_backend=backend
+                ),
+                "compact",
+            )
 
     def test_unsupported_combinations_fail(self):
         for changes in (
             dict(decode_backend="breakable"),
             dict(attn_dp_size=2),
+            dict(attn_dp_size=3, enable_dp_lm_head=True),
+            dict(
+                attn_dp_size=2,
+                enable_dp_lm_head=True,
+                speculative_skip_dp_mlp_sync=True,
+            ),
             dict(dp_size=2),
             dict(attn_cp_size=2),
             dict(dcp_size=2),

@@ -11,6 +11,8 @@ from typing import NamedTuple
 
 import torch
 
+from sglang.srt.environ import envs
+
 
 def validate_npu_dspark_compact(cfg, mode: str) -> None:
     """Fail before model loading for execution paths not covered by this port."""
@@ -19,8 +21,22 @@ def validate_npu_dspark_compact(cfg, mode: str) -> None:
     unsupported = []
     if cfg.cuda_graph_config.decode.backend not in ("disabled", "full"):
         unsupported.append("decode graph backend full or disabled")
-    if cfg.attn_dp_size != 1 or cfg.dp_size != 1:
-        unsupported.append("DP size 1 and attention DP size 1")
+    if cfg.dp_size != 1:
+        unsupported.append("replica DP size 1 (attention DP is supported)")
+    if cfg.attn_dp_size > 1:
+        if not cfg.enable_dp_lm_head:
+            unsupported.append("--enable-dp-lm-head for attention DP")
+        if cfg.tp_size % cfg.attn_dp_size:
+            unsupported.append("TP size divisible by attention DP size")
+        if (
+            cfg.speculative_skip_dp_mlp_sync
+            or envs.SGLANG_SCHEDULER_SKIP_ALL_GATHER.get()
+        ):
+            unsupported.append(
+                "DP MLP synchronization and scheduler all-gather enabled"
+            )
+        if envs.SGLANG_ENABLE_DP_SPEC_PREFILL_COORDINATION.get():
+            unsupported.append("DP speculative prefill coordination disabled")
     if cfg.attn_cp_size != 1 or cfg.pp_size != 1:
         unsupported.append("attention CP size 1 and PP size 1")
     if cfg.dcp_size != 1:

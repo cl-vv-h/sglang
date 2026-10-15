@@ -49,6 +49,8 @@ def status(args):
         "model_path",
         "served_model_name",
         "tp_size",
+        "attn_dp_size",
+        "enable_dp_lm_head",
         "nnodes",
         "disable_overlap_schedule",
         "cuda_graph_config",
@@ -85,7 +87,7 @@ def status(args):
     return 0
 
 
-def generate(base, prompt, max_tokens, timeout):
+def generate(base, prompt, max_tokens, timeout, routed_dp_rank=None):
     started = time.monotonic()
     try:
         result = http_json(
@@ -98,6 +100,11 @@ def generate(base, prompt, max_tokens, timeout):
                     "max_new_tokens": max_tokens,
                 },
                 "stream": False,
+                **(
+                    {"routed_dp_rank": routed_dp_rank}
+                    if routed_dp_rank is not None
+                    else {}
+                ),
             },
         )
         if not isinstance(result, dict) or not isinstance(result.get("text"), str):
@@ -168,7 +175,9 @@ def capture(args):
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = [
-            pool.submit(generate, base, p, args.max_tokens, args.timeout)
+            pool.submit(
+                generate, base, p, args.max_tokens, args.timeout, args.routed_dp_rank
+            )
             for p in prompts
         ]
         results = [f.result() for f in futures]
@@ -186,11 +195,9 @@ def capture(args):
         "wall_seconds": wall,
         "completion_tokens": tokens,
         "observed_tokens_per_second": tokens / wall if tokens is not None else None,
-        "p95_successful_request_seconds": latencies[
-            math.ceil(0.95 * len(latencies)) - 1
-        ]
-        if latencies
-        else None,
+        "p95_successful_request_seconds": (
+            latencies[math.ceil(0.95 * len(latencies)) - 1] if latencies else None
+        ),
         "dspark_telemetry": telemetry(before, after),
     }
     report = {
@@ -200,6 +207,7 @@ def capture(args):
             "requests": args.requests,
             "max_tokens": args.max_tokens,
             "temperature": 0,
+            "routed_dp_rank": args.routed_dp_rank,
         },
         "prompts": prompts,
         "results": results,
@@ -223,6 +231,10 @@ def compare(args):
             raise ValueError("Different workload setting: " + field)
     if baseline["prompts"] != candidate["prompts"]:
         raise ValueError("Different prompts")
+    if baseline["settings"].get("routed_dp_rank") != candidate["settings"].get(
+        "routed_dp_rank"
+    ):
+        raise ValueError("Different routed_dp_rank")
     if len(baseline["results"]) != len(candidate["results"]) or not baseline["results"]:
         raise ValueError("Empty or mismatched results")
     mismatches = []
@@ -253,6 +265,12 @@ def main():
     run.add_argument("--concurrency", type=int, default=4)
     run.add_argument("--requests", type=int, default=16)
     run.add_argument("--max-tokens", type=int, default=256)
+    run.add_argument(
+        "--routed-dp-rank",
+        type=int,
+        default=None,
+        help="Pin all requests to one DP rank to exercise idle peers",
+    )
     run.add_argument("--timeout", type=float, default=600)
     run.add_argument("--out", type=Path, required=True)
     diff = sub.add_parser("compare")
@@ -269,6 +287,8 @@ def main():
     if args.command == "capture":
         if min(args.concurrency, args.requests, args.max_tokens, args.timeout) <= 0:
             parser.error("Workload counts and timeout must be positive")
+        if args.routed_dp_rank is not None and args.routed_dp_rank < 0:
+            parser.error("routed-dp-rank must be nonnegative")
         return capture(args)
     return compare(args)
 

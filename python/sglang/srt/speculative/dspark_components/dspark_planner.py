@@ -13,7 +13,7 @@ from sglang.kernels.ops.speculative.dspark.dspark_schedule import (
 )
 from sglang.srt.distributed.utils import all_gather_single
 from sglang.srt.environ import InvariantCheckLevel, envs
-from sglang.srt.layers.dp_attention import is_dp_attention_enabled
+from sglang.srt.layers.dp_attention import get_dp_tp_group, is_dp_attention_enabled
 from sglang.srt.managers.overlap_utils import (
     CONFIDENCE_RELAY_RING_LAG,
     FutureMap,
@@ -166,10 +166,15 @@ class DSparkVerifyPlanner:
                 model_runner=self.model_runner,
                 relay_lag_steps=relay_lag_steps,
             )
-            self._dynamic_graph_tier = not is_dp_attention_enabled()
+            self._dynamic_graph_tier = (
+                not is_dp_attention_enabled() or self._npu_glm_target
+            )
             self._dp_tier_gather_enabled = (
                 self._ragged_verify_mode is RaggedVerifyMode.COMPACT
                 and is_dp_attention_enabled()
+                # GLM dense draft agrees on actual packed widths at the
+                # target boundary, including in non-overlap execution.
+                and not self._npu_glm_target
                 and get_parallel().attn_tp_size == 1
                 and get_parallel().attn_cp_size == 1
                 and require_mlp_tp_gather()
@@ -206,6 +211,13 @@ class DSparkVerifyPlanner:
                         "budget degenerates to verify-all (zero scheduling gain). "
                         "Pass a profiled --speculative-dspark-sps-table-path."
                     )
+
+    @property
+    def _npu_glm_target(self) -> bool:
+        from sglang.srt.configs.model_config import is_glm_moe_dsa
+
+        config = getattr(self.model_runner, "model_config", None)
+        return _is_npu and config is not None and is_glm_moe_dsa(config.hf_config)
 
     @property
     def _npu_glm_compact(self) -> bool:
@@ -277,7 +289,7 @@ class DSparkVerifyPlanner:
         if self._npu_glm_compact:
             # Ring event readiness can differ across ranks. Never let that
             # choose different token tiers / HCCL collective shapes.
-            draft_input.verify_token_budget = get_parallel().tp_group.broadcast_object(
+            draft_input.verify_token_budget = get_dp_tp_group().broadcast_object(
                 draft_input.verify_token_budget, src=0
             )
         batch.spec_verify_tier_num_tokens = local_verify_tier_num_tokens(
@@ -344,7 +356,7 @@ class DSparkVerifyPlanner:
             resolved=resolved, req_pool_indices_cpu=req_pool_indices_cpu
         )
         if self._npu_glm_compact:
-            budget = get_parallel().tp_group.broadcast_object(budget, src=0)
+            budget = get_dp_tp_group().broadcast_object(budget, src=0)
         return budget
 
     def resolve_verify_token_budget(
@@ -362,8 +374,8 @@ class DSparkVerifyPlanner:
         if not get_schedule().disable_overlap_schedule:
             return draft_input.verify_token_budget
 
-        # No collective: the budget derives only from the broadcast draft tokens
-        # (via confidence), replicated req_generation, and the static sps table.
+        # GLM NPU synchronizes readiness/budget within this request's attention
+        # TP group; different attention-DP groups own independent requests.
         draft_input.verify_token_budget = self.compute_budget_sync(
             confidence=confidence,
             prefix_lens=prefix_lens,

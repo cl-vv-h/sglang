@@ -186,9 +186,7 @@ def test_tp_broadcast_budget_precedes_tier_choice(
     group = SimpleNamespace(broadcast_object=Mock(return_value=root_budget))
     with (
         patch.object(dspark_planner, "_is_npu", is_npu),
-        patch.object(
-            dspark_planner, "get_parallel", return_value=SimpleNamespace(tp_group=group)
-        ) as parallel,
+        patch.object(dspark_planner, "get_dp_tp_group", return_value=group) as parallel,
     ):
         planner.prepare_verify_budget(batch, Mock())
     assert batch.spec_info.verify_token_budget == expected_budget
@@ -215,9 +213,7 @@ def test_sync_budget_uses_runtime_tp_group(is_npu, is_glm):
     draft_input = SimpleNamespace()
     with (
         patch.object(dspark_planner, "_is_npu", is_npu),
-        patch.object(
-            dspark_planner, "get_parallel", return_value=SimpleNamespace(tp_group=group)
-        ) as parallel,
+        patch.object(dspark_planner, "get_dp_tp_group", return_value=group) as parallel,
         patch.object(
             dspark_planner,
             "get_schedule",
@@ -293,8 +289,8 @@ def test_planner_constructed_before_backend_detects_glm_after_initialization(mod
             group = SimpleNamespace(broadcast_object=Mock(return_value=3))
             with patch.object(
                 dspark_planner,
-                "get_parallel",
-                return_value=SimpleNamespace(tp_group=group),
+                "get_dp_tp_group",
+                return_value=group,
             ):
                 budget = planner.compute_budget_sync(
                     confidence=torch.ones(2, 3),

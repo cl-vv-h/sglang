@@ -243,19 +243,33 @@ class TargetVerifyExecutor:
         )
         if idle_layout is not None:
             num_dummy_slots = int(idle_layout.verify_lens.numel())
-            batch.seq_lens = torch.ones(
-                (num_dummy_slots,), dtype=torch.int64, device=device
+            glm_idle = _is_npu and getattr(
+                self.model_runner.attn_backend, "_dspark_dsa_ragged_verify", False
+            )
+            batch.seq_lens = torch.full(
+                (num_dummy_slots,),
+                0 if glm_idle else 1,
+                dtype=torch.int64,
+                device=device,
             )
             batch.req_pool_indices = torch.zeros(
                 (num_dummy_slots,), dtype=torch.int64, device=device
             )
-            batch.seq_lens_cpu = torch.ones((num_dummy_slots,), dtype=torch.int64)
-            batch.seq_lens_sum = num_dummy_slots
+            batch.seq_lens_cpu = torch.full(
+                (num_dummy_slots,), 0 if glm_idle else 1, dtype=torch.int64
+            )
+            batch.seq_lens_sum = 0 if glm_idle else num_dummy_slots
             batch.forward_mode = ForwardMode.TARGET_VERIFY
         verify_input.live_seq_lens_cpu = batch.seq_lens_cpu
         verify_forward_batch, _ = verify_input.prepare_for_verify(
             batch, self.target_worker
         )
+        if _is_npu:
+            from sglang.srt.hardware_backend.npu.dspark_dp import (
+                prepare_compact_dp_forward_batch,
+            )
+
+            prepare_compact_dp_forward_batch(verify_forward_batch, self.model_runner)
         self.target_worker.forward_batch_generation(
             batch=None,
             forward_batch=verify_forward_batch,
@@ -330,6 +344,12 @@ class TargetVerifyExecutor:
         batch.seq_lens_cpu = seq_lens_cpu_backup
         batch.seq_lens_sum = seq_lens_sum_backup
 
+        if _is_npu:
+            from sglang.srt.hardware_backend.npu.dspark_dp import (
+                prepare_compact_dp_forward_batch,
+            )
+
+            prepare_compact_dp_forward_batch(verify_forward_batch, self.model_runner)
         target_out = self.target_worker.forward_batch_generation(
             batch=None,
             forward_batch=verify_forward_batch,
@@ -883,7 +903,8 @@ def sample_simulated_bonus(
     verify_num_draft_tokens: int,
 ) -> torch.Tensor:
     """Temperature-sample every verify row and return the row at the (simulated)
-    correct_len as the bonus token. Temperature only: callers exclude top-p/top-k/min-p."""
+    correct_len as the bonus token. Temperature only: callers exclude top-p/top-k/min-p.
+    """
     bonus = simulated_bonus_sample(
         target_logits=target_logits,
         correct_len=correct_len,

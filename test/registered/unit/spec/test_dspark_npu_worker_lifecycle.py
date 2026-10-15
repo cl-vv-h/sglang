@@ -53,11 +53,14 @@ def _cpu_scatter_into(*, compact, verify_lens, out, stride, fill_value):
     return out
 
 
+@pytest.mark.parametrize("attn_dp_size", [1, 2])
 @pytest.mark.parametrize("mode", ["static", "compact"])
 @pytest.mark.parametrize("graph", [False, True])
 @pytest.mark.parametrize("profile", [False, True])
 @pytest.mark.parametrize("quarot", [False, True])
-def test_dense_worker_constructor_to_draft_sampler_warmup(mode, graph, profile, quarot):
+def test_dense_worker_constructor_to_draft_sampler_warmup(
+    mode, graph, profile, quarot, attn_dp_size
+):
     group = SimpleNamespace(world_size=1, rank_in_group=0)
     target_hf = PretrainedConfig(architectures=["GlmMoeDsaForCausalLM"])
     target_cfg = SimpleNamespace(
@@ -143,14 +146,18 @@ def test_dense_worker_constructor_to_draft_sampler_warmup(mode, graph, profile, 
             page_size=128,
             speculative_num_draft_tokens=4,
             max_running_requests=4,
+            tp_size=attn_dp_size,
+            attn_dp_size=attn_dp_size,
+            enable_dp_lm_head=attn_dp_size > 1,
             cuda_graph_config=config,
         ) as args,
         get_parallel().override(
-            tp_group=group,
+            tp_group=SimpleNamespace(world_size=attn_dp_size, rank_in_group=0),
             attn_tp_group=group,
             pp_group=SimpleNamespace(is_last_rank=True),
             tp_rank=0,
             attn_tp_rank=0,
+            attn_dp_enabled=attn_dp_size > 1,
         ),
         envs.SGLANG_RAGGED_VERIFY_MODE.override(mode),
         envs.SGLANG_NPU_GLM_DSPARK_APPLY_QUAROT_TO_DRAFT.override(quarot),

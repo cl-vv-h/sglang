@@ -589,6 +589,11 @@ class AscendAttnBackend(AttentionBackend):
         self.forward_metadata = ForwardMetadata()
         layout = self._glm_compact_layout(forward_batch)
         if layout is not None:
+            if get_parallel().attn_dp_enabled:
+                # DP eager fallback uses the same agreed token padding as
+                # replay. The separate sink slot owns all padding queries.
+                self._init_compact_graph_metadata(forward_batch, layout)
+                return
             compact = build_compact_verify_metadata(
                 prefix_lens=forward_batch.seq_lens,
                 layout=layout,
