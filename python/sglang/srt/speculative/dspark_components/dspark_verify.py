@@ -48,6 +48,7 @@ from sglang.srt.speculative.spec_utils import (
     sample_simulated_acc_len,
 )
 from sglang.srt.utils import is_hip, is_npu
+from sglang.srt.utils.common import is_device_stream_capturing
 from sglang.srt.utils.invariants import Bucket, Invariant, NotNaN, expect
 
 _is_hip = is_hip()
@@ -680,7 +681,7 @@ class DsparkVerifyEpilogue:
             and buf.shape[1] == compact.shape[1]
         ):
             return buf
-        assert not torch.get_device_module().is_current_stream_capturing(), (
+        assert not is_device_stream_capturing(compact.device), (
             "DsparkVerifyEpilogue output buffers must be allocated during "
             "warmup, not inside graph capture (pool memory is unreadable "
             "post-replay)."
