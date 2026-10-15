@@ -129,6 +129,9 @@ if [ "$PRINT_COMMAND" = 1 ]; then
   printf '# LOG_FILE=%q\n' "$LOG_FILE"
   printf '# DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n' \
     "$DEEPEP_MODE" "${HCCL_BUFFSIZE:-1000}" "${DEEPEP_HCCL_BUFFSIZE:-inherit}"
+  printf '# DeepEP: LL_capacity=%s normal_rounds=%s normal_tokens_per_round=%s\n' \
+    "${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}" \
+    "${DEEPEP_NORMAL_LONG_SEQ_ROUND:-72}" "${DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS:-1024}"
   printf 'python3 -m sglang.launch_server '
   printf '%q ' "${SERVER_ARGS[@]}"
   printf '\n'
@@ -214,4 +217,7 @@ printf '%q ' "${SERVER_ARGS[@]}"
 printf '\n'
 printf 'Communication: DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n' \
   "$DEEPEP_MODE" "$HCCL_BUFFSIZE" "${DEEPEP_HCCL_BUFFSIZE:-inherit}"
+printf 'DeepEP: LL_capacity=%s normal_rounds=%s normal_tokens_per_round=%s\n' \
+  "${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}" \
+  "$DEEPEP_NORMAL_LONG_SEQ_ROUND" "$DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS"
 exec python3 -m sglang.launch_server "${SERVER_ARGS[@]}"

@@ -12,6 +12,7 @@ non-NPU hosts.
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager
 from functools import partial
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.runner.base_cuda_graph_runner import (
         BaseCudaGraphRunner,
     )
+
+logger = logging.getLogger(__name__)
 
 
 class NPUCudaGraphBackend(BaseCudaGraphBackend):
@@ -86,6 +89,33 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
         finally:
             self._capture_stream = None
 
+    @contextmanager
+    def _capture_phase(self, shape_key, phase):
+        # Startup-only diagnostics. Do not empty the allocator cache or insert
+        # extra device synchronization: those would change the failure being
+        # diagnosed. Report the current stream as well as the intended stream.
+        if get_bool_env_var("SGLANG_NPU_DEBUG_GRAPH_CAPTURE"):
+            free, total = self._device_module.mem_get_info()
+            logger.info(
+                "[NPU-GRAPH] phase=%s key=%s free=%.3f GiB total=%.3f GiB "
+                "allocated=%.3f GiB reserved=%.3f GiB stream=%s capture_stream=%s",
+                phase,
+                shape_key,
+                free / (1 << 30),
+                total / (1 << 30),
+                self._device_module.memory_allocated() / (1 << 30),
+                self._device_module.memory_reserved() / (1 << 30),
+                self._device_module.current_stream(),
+                self._capture_stream,
+            )
+        try:
+            yield
+        except Exception:
+            # Never query the device after an operator failure: secondary NPU
+            # exceptions can hide the first failure. Preserve its traceback.
+            logger.exception("[NPU-GRAPH] failed phase=%s key=%s", phase, shape_key)
+            raise
+
     def capture_one(
         self,
         shape_key: ShapeKey,
@@ -97,12 +127,13 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
 
         # Two warmups so kernels are loaded and one-time setup is paid before capture.
         # post_warmup_hook lets the attention backend reset state that warmup mutated.
-        for _ in range(2):
-            self._device_module.synchronize()
-            self._tp_group.barrier()
-            forward_fn()
-            if post_warmup_hook is not None:
-                post_warmup_hook()
+        for index in range(2):
+            with self._capture_phase(shape_key, f"warmup-{index + 1}"):
+                self._device_module.synchronize()
+                self._tp_group.barrier()
+                forward_fn()
+                if post_warmup_hook is not None:
+                    post_warmup_hook()
 
         graph = torch.npu.NPUGraph()
 
@@ -124,6 +155,7 @@ class NPUCudaGraphBackend(BaseCudaGraphBackend):
             graph_ctx = torch.npu.graph
 
         with (
+            self._capture_phase(shape_key, "capture"),
             skip_guard_context,
             graph_ctx(
                 graph,

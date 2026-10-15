@@ -155,6 +155,32 @@ SPS_TABLE=/home/sps_npu_tp16_adp4.json \
 如果缩小 KV 后仍报 allocator 未注册，需要对齐服务器 torch、torch_npu、CANN 和
 sgl-kernel-npu 的具体版本，并获取首个异常的完整调用栈后再修改流管理。
 
+如果静态预算下界约为 0.911，0.915 仍报同样错误，不再通过反复调整静态比例定位。
+可以保留图，以较小的通信 buffer 和 dispatch 容量做一次受限负载验证：
+
+```bash
+MEM_FRACTION_STATIC=0.915 CONTEXT_LENGTH=2048 MAX_TOTAL_TOKENS=4096 \
+MAX_RUNNING_REQUESTS=8 CHUNKED_PREFILL_SIZE=1024 MAX_PREFILL_TOKENS=2048 \
+GRAPH_BATCH_SIZES="4" ATTN_DP_SIZE=4 GRAPH=1 OVERLAP=1 DEEPEP_MODE=auto \
+HCCL_BUFFSIZE=512 DEEPEP_HCCL_BUFFSIZE=512 \
+SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=64 \
+DEEPEP_NORMAL_LONG_SEQ_ROUND=256 DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS=64 \
+SGLANG_NPU_DEBUG_GRAPH_CAPTURE=1 \
+SPS_TABLE=/home/sps_npu_tp16_adp4.json \
+  bash examples/runtime/npu/launch_glm52_dspark_compact_dp.sh
+```
+
+这是需要实机验证的定位配置，不保证解决 allocator 注册错误。两个 HCCL 配置同时
+设置，避免 MoE process group 的独立覆盖让调整不生效。LL 容量从默认 128 降到 64，
+仍覆盖这里的 4 请求 × 9 token = 36 token 图；不能同时换成 8 请求/72 token 图。
+正常通信的每轮 token 数也相应减小，`256 × 64 = 16384` 是本配置的 normal 输入
+容量上限；不要将这些通信设置直接复用于原来的长 prefill/高并发配置。
+
+`[NPU-GRAPH] phase=warmup-1/warmup-2/capture` 给出每个阶段开始前的空闲、已分配、
+已保留显存及当前流/捕获流。`failed phase=...` 标记异常被观察到的阶段，保留原始
+异常栈；异步报错也可能来自前序算子。此诊断不增加设备同步或清空 allocator cache，
+不调用私有 allocator 注册接口，也不关闭图。关闭该调试变量后不采集这些内存信息。
+
 ## 实现与范围
 
 1. `dspark_planner.py`：预算从全 TP 广播改为本请求所在的 Attention TP 组广播。
