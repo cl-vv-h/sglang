@@ -13,6 +13,7 @@ PORT="${PORT:-8030}"
 TP_SIZE="${TP_SIZE:-16}"
 ATTN_DP_SIZE="${ATTN_DP_SIZE:-4}"
 OVERLAP="${OVERLAP:-1}"
+DEEPEP_MODE="${DEEPEP_MODE:-auto}"
 NETWORK_IFACE="${NETWORK_IFACE:-lo}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-GLM-5.2-w8a8}"
 
@@ -51,6 +52,7 @@ KERNEL_OVERLAY_SCRIPT="${KERNEL_OVERLAY_SCRIPT:-${SGLANG_ROOT}/devtools/glm52_ms
 fail() { echo "ERROR: $*" >&2; exit 2; }
 [ "$#" -eq 0 ] || fail "Single-node script takes no node-rank argument; use TP_SIZE=N."
 case "$MODE" in dspark|target-only) ;; *) fail "Invalid MODE: $MODE" ;; esac
+case "$DEEPEP_MODE" in auto|normal|low_latency) ;; *) fail 'Invalid DEEPEP_MODE.' ;; esac
 for setting in GRAPH OVERLAP SPS_PROFILE DSPARK_DEBUG PRINT_COMMAND SYSTEM_TUNE REGISTER_KERNEL_OVERLAY; do
   case "${!setting}" in 0|1) ;; *) fail "$setting must be 0 or 1" ;; esac
 done
@@ -91,7 +93,7 @@ SERVER_ARGS=(
   --served-model-name "$SERVED_MODEL_NAME"
   --quantization modelslim
   --moe-a2a-backend deepep
-  --deepep-mode auto
+  --deepep-mode "$DEEPEP_MODE"
   --enable-cache-report
   --enable-metrics
   --log-level info
@@ -125,6 +127,8 @@ if [ "$PRINT_COMMAND" = 1 ]; then
   printf '# SGLANG_RAGGED_VERIFY_MODE=%s DSPARK_DEBUG=%s SPS_PROFILE=%s\n' \
     "$RAGGED_VERIFY_MODE" "$DSPARK_DEBUG" "$SPS_PROFILE"
   printf '# LOG_FILE=%q\n' "$LOG_FILE"
+  printf '# DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n' \
+    "$DEEPEP_MODE" "${HCCL_BUFFSIZE:-1000}" "${DEEPEP_HCCL_BUFFSIZE:-inherit}"
   printf 'python3 -m sglang.launch_server '
   printf '%q ' "${SERVER_ARGS[@]}"
   printf '\n'
@@ -175,14 +179,14 @@ export STREAMS_PER_DEVICE=32
 export SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT=600
 export SGLANG_ENABLE_OVERLAP_PLAN_STREAM="${SGLANG_ENABLE_OVERLAP_PLAN_STREAM:-1}"
 export SGLANG_NPU_USE_MULTI_STREAM="${SGLANG_NPU_USE_MULTI_STREAM:-0}"
-export HCCL_BUFFSIZE=1000
+export HCCL_BUFFSIZE="${HCCL_BUFFSIZE:-1000}"
 export HCCL_OP_EXPANSION_MODE=AIV
 export HCCL_SOCKET_IFNAME="$NETWORK_IFACE"
 export GLOO_SOCKET_IFNAME="$NETWORK_IFACE"
 export TRANSFORMERS_VERBOSITY=error
 export DEEP_NORMAL_MODE_USE_INT8_QUANT=1
-export DEEPEP_NORMAL_LONG_SEQ_ROUND=72
-export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS=1024
+export DEEPEP_NORMAL_LONG_SEQ_ROUND="${DEEPEP_NORMAL_LONG_SEQ_ROUND:-72}"
+export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS="${DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS:-1024}"
 export DEEPEP_NORMAL_COMBINE_ENABLE_LONG_SEQ=1
 export PYTHONPATH="${SGLANG_ROOT}/python${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$MODE" = dspark ]; then
@@ -208,4 +212,6 @@ printf 'Starting A3: MODE=%s TP=%s ATTN_DP=%s ATTN_TP=%s GRAPH=%s OVERLAP=%s SPS
 printf 'Command: python3 -m sglang.launch_server '
 printf '%q ' "${SERVER_ARGS[@]}"
 printf '\n'
+printf 'Communication: DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n' \
+  "$DEEPEP_MODE" "$HCCL_BUFFSIZE" "${DEEPEP_HCCL_BUFFSIZE:-inherit}"
 exec python3 -m sglang.launch_server "${SERVER_ARGS[@]}"

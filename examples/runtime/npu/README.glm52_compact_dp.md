@@ -123,6 +123,38 @@ python test/manual/npu/validate_glm52_compact.py capture \
 除输出一致性外，还应检查长时间混合请求、取消请求和重复请求后的稳定性。
 不同并行拓扑或浮点归约顺序可能产生 greedy 分歧，需要结合分歧位置和任务精度排查。
 
+## 图捕获阶段的 HCCL 资源分配失败
+
+`aclnnMoeLowLatencyDispatchV2` 报错代表 auto 模式已进入低延迟通信路径。
+如果同时出现 `Failed to allocate ... NPU memory` 和
+`stream is not registered with any allocator`，应分别检查剩余内存与通信算子使用的
+stream/allocator；捕获前的空闲显存不足以证明错误仅由 OOM 引起。
+
+先保留图、overlap 和原有通信 buffer，仅缩小 KV 预算进行对照：
+
+```bash
+MEM_FRACTION_STATIC=0.92 CONTEXT_LENGTH=4096 MAX_TOTAL_TOKENS=8192 \
+MAX_RUNNING_REQUESTS=8 CHUNKED_PREFILL_SIZE=2048 MAX_PREFILL_TOKENS=4096 \
+GRAPH_BATCH_SIZES="4" ATTN_DP_SIZE=4 GRAPH=1 OVERLAP=1 \
+SPS_TABLE=/home/sps_npu_tp16_adp4.json \
+  bash examples/runtime/npu/launch_glm52_dspark_compact_dp.sh
+```
+
+这一配置是定位用的起点，不是已完成硬件验证的容量配置。
+`mem_fraction_static` 必须高于权重预算检查给出的最低值；提高它能放大静态预算，
+但不保证给后续通信、图捕获留下足够空间。显式降低 `MAX_TOTAL_TOKENS` 可限制 KV 分配。
+
+脚本允许覆盖 `DEEPEP_MODE`、`HCCL_BUFFSIZE`、`DEEPEP_NORMAL_LONG_SEQ_ROUND`、
+`DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS`；`DEEPEP_HCCL_BUFFSIZE` 保持透传，当前框架
+对 default/MoE process group 的该配置优先于 `HCCL_BUFFSIZE`。
+调小通信 buffer 前需按实际 token 数、hidden size、专家数、通信策略检查容量下界，
+不能把小 batch 的设置直接用于长 prefill。
+
+若要比较 normal 路径，可以使用 `DEEPEP_MODE=normal GRAPH=0`。
+当前基线会在 normal 模式自动禁用图，因此这种对照不能证明 compact + DP + 图已修复。
+如果缩小 KV 后仍报 allocator 未注册，需要对齐服务器 torch、torch_npu、CANN 和
+sgl-kernel-npu 的具体版本，并获取首个异常的完整调用栈后再修改流管理。
+
 ## 实现与范围
 
 1. `dspark_planner.py`：预算从全 TP 广播改为本请求所在的 Attention TP 组广播。
