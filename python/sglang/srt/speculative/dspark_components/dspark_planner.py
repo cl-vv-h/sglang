@@ -83,9 +83,6 @@ class DSparkVerifyPlanner:
         self.draft_model = draft_model
         self.gamma = gamma
         self.model_runner = model_runner
-        self._npu_glm_compact = _is_npu and getattr(
-            model_runner.attn_backend, "_dspark_dsa_ragged_verify", False
-        )
         self.device = device
         self.verify_num_draft_tokens = verify_num_draft_tokens
         self._tp_sync = tp_sync
@@ -209,6 +206,17 @@ class DSparkVerifyPlanner:
                         "budget degenerates to verify-all (zero scheduling gain). "
                         "Pass a profiled --speculative-dspark-sps-table-path."
                     )
+
+    @property
+    def _npu_glm_compact(self) -> bool:
+        # The scheduler constructs the planner before allocating KV pools and
+        # initializing attention backends. Resolve this at budget-use time;
+        # caching False during construction would silently disable TP sync.
+        return _is_npu and getattr(
+            getattr(self.model_runner, "attn_backend", None),
+            "_dspark_dsa_ragged_verify",
+            False,
+        )
 
     @property
     def carries_confidence(self) -> bool:

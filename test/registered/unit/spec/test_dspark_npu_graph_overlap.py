@@ -19,7 +19,7 @@ from sglang.srt.managers.overlap_utils import (
 )
 from sglang.srt.speculative.dspark_components import dspark_planner
 from sglang.srt.speculative.dspark_components.dspark_planner import DSparkScheduleConfig
-from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout
+from sglang.srt.speculative.ragged_verify import RaggedVerifyLayout, RaggedVerifyMode
 from sglang.test.ci.ci_register import register_cpu_ci
 
 register_cpu_ci(est_time=10, suite="base-a-test-cpu")
@@ -169,7 +169,9 @@ def test_tp_broadcast_budget_precedes_tier_choice(
         dspark_planner.DSparkVerifyPlanner
     )
     planner._budget_planner = Mock()
-    planner._npu_glm_compact = is_npu
+    planner.model_runner = SimpleNamespace(
+        attn_backend=SimpleNamespace(_dspark_dsa_ragged_verify=is_npu)
+    )
     planner._budget_from_resolved = Mock(return_value=local_budget)
     planner._maybe_gather_dp_verify_tier = Mock()
     planner.verify_num_draft_tokens = 8
@@ -204,10 +206,10 @@ def test_sync_budget_uses_runtime_tp_group(is_npu, is_glm):
         dspark_planner.DSparkVerifyPlanner
     )
     planner._budget_planner = Mock()
-    planner._npu_glm_compact = is_npu and is_glm
     planner._budget_from_resolved = Mock(return_value=1)
     planner.model_runner = SimpleNamespace(
-        req_to_token_pool=SimpleNamespace(req_generation=torch.tensor([10, 20, 30]))
+        req_to_token_pool=SimpleNamespace(req_generation=torch.tensor([10, 20, 30])),
+        attn_backend=SimpleNamespace(_dspark_dsa_ragged_verify=is_glm),
     )
     group = SimpleNamespace(broadcast_object=Mock(return_value=6))
     draft_input = SimpleNamespace()
@@ -239,12 +241,77 @@ def test_sync_budget_uses_runtime_tp_group(is_npu, is_glm):
         group.broadcast_object.assert_not_called()
 
 
+@pytest.mark.parametrize("mode", [RaggedVerifyMode.STATIC, RaggedVerifyMode.COMPACT])
+def test_planner_constructed_before_backend_detects_glm_after_initialization(mode):
+    # Match Scheduler: create worker/planner, allocate pools, then initialize
+    # attention backends. Constructor must neither read a missing backend nor
+    # permanently cache a negative capability result from that startup phase.
+    runner = SimpleNamespace()
+    with (
+        patch.object(dspark_planner, "_is_npu", True),
+        patch.object(dspark_planner, "read_ragged_verify_mode", return_value=mode),
+        patch.object(
+            dspark_planner,
+            "get_spec",
+            return_value=SimpleNamespace(
+                speculative_dspark_align_verify_tokens_to_graph_tier=False,
+                speculative_dspark_confidence_sts_path=None,
+            ),
+        ),
+        patch.object(
+            dspark_planner,
+            "get_schedule",
+            return_value=SimpleNamespace(
+                disable_overlap_schedule=False,
+            ),
+        ),
+        patch.object(dspark_planner, "is_dp_attention_enabled", return_value=False),
+        patch.object(
+            dspark_planner,
+            "build_sps_cost_table",
+            return_value=dspark_planner.build_uninitialized_sps_table(
+                max_batch_tokens=16
+            ),
+        ),
+    ):
+        planner = dspark_planner.DSparkVerifyPlanner(
+            draft_model=SimpleNamespace(confidence_head=object()),
+            gamma=3,
+            model_runner=runner,
+            device="cpu",
+            tp_rank=1,
+            verify_num_draft_tokens=4,
+            tp_sync=Mock(),
+        )
+        assert not hasattr(runner, "attn_backend")
+        assert not planner._npu_glm_compact
+        runner.req_to_token_pool = SimpleNamespace(req_generation=torch.tensor([0, 0]))
+        runner.attn_backend = SimpleNamespace(_dspark_dsa_ragged_verify=True)
+        assert planner._npu_glm_compact
+        if mode is RaggedVerifyMode.COMPACT:
+            planner._budget_from_resolved = Mock(return_value=1)
+            group = SimpleNamespace(broadcast_object=Mock(return_value=3))
+            with patch.object(
+                dspark_planner,
+                "get_parallel",
+                return_value=SimpleNamespace(tp_group=group),
+            ):
+                budget = planner.compute_budget_sync(
+                    confidence=torch.ones(2, 3),
+                    prefix_lens=torch.tensor([4, 8]),
+                    req_pool_indices=torch.tensor([0, 1]),
+                )
+            assert budget == 3
+            group.broadcast_object.assert_called_once_with(1, src=0)
+        runner.attn_backend = SimpleNamespace(_dspark_dsa_ragged_verify=False)
+        assert not planner._npu_glm_compact
+
+
 def test_gpu_forced_budget_behavior_unchanged():
     planner = dspark_planner.DSparkVerifyPlanner.__new__(
         dspark_planner.DSparkVerifyPlanner
     )
     planner._budget_planner = Mock()
-    planner._npu_glm_compact = False
     planner._is_verify_all = True
     with patch.object(dspark_planner, "_is_npu", False):
         planner.set_forced_budget_frac(0.25)
