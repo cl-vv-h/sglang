@@ -7,6 +7,8 @@ eager / NPU full graph、开启或关闭 overlap schedule 的路径，保留 Qua
 
 ## 启动
 
+双机各 16 卡使用独立的 [双机脚本和说明](README.glm52_compact_dp_2nodes.md)。
+
 在 A3 单机 16 卡上，从仓库根目录运行：
 
 ```bash
