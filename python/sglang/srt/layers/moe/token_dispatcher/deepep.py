@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Union
 
@@ -528,6 +528,26 @@ class _DeepEPDispatcherImplBase:
                 self.deepep_output_dtype = DispatcherOutputDtype.FP8
             # NVFP4 is supported on GPU, no adjustment needed
 
+    @contextmanager
+    def _dispatch_quantization_context(self):
+        # DeepEP falls back to this legacy process-wide flag even when all
+        # explicit quantization flags are false. BF16 dispatch is a per-layer
+        # contract (e.g. MXFP8 target and unquantized draft); do not let an INT8
+        # target's environment turn its payload and scales into per-token INT8.
+        if not _is_npu or self.use_fp8 or self.use_mxfp4 or self.use_mxfp8:
+            yield
+            return
+        key = "DEEP_NORMAL_MODE_USE_INT8_QUANT"
+        previous = os.environ.get(key)
+        if previous != "1":
+            yield
+            return
+        os.environ[key] = "0"
+        try:
+            yield
+        finally:
+            os.environ[key] = previous
+
     def _update_int8_quant_env(self) -> None:
         """TODO adapt different quantization schemes for base model and draft model on NPU"""
         pass
@@ -656,28 +676,30 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
 
         _deepep_precompile_tp_barrier()
         npu_quantization_opts = self._get_quantization_kwargs(buffer)
-        (
-            recv_x,
-            recv_topk_ids,
-            recv_topk_weights,
-            num_recv_tokens_per_expert,
-            self.handle,
-            event,
-        ) = buffer.dispatch(
-            x,
-            topk_idx=topk_ids,
-            topk_weights=topk_weights,
-            num_tokens_per_rank=num_tokens_per_rank,
-            num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-            is_token_in_rank=is_token_in_rank,
-            num_tokens_per_expert=num_tokens_per_expert,
-            previous_event=previous_event,
-            async_finish=self.async_finish,
-            allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
-            config=DeepEPConfig.get_instance().normal_dispatch_config,
-            **npu_quantization_opts,
-        )
+        with self._dispatch_quantization_context():
+            (
+                recv_x,
+                recv_topk_ids,
+                recv_topk_weights,
+                num_recv_tokens_per_expert,
+                self.handle,
+                event,
+            ) = buffer.dispatch(
+                x,
+                topk_idx=topk_ids,
+                topk_weights=topk_weights,
+                num_tokens_per_rank=num_tokens_per_rank,
+                num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
+                is_token_in_rank=is_token_in_rank,
+                num_tokens_per_expert=num_tokens_per_expert,
+                previous_event=previous_event,
+                async_finish=self.async_finish,
+                allocate_on_comm_stream=(previous_event is not None)
+                and self.async_finish,
+                expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+                config=DeepEPConfig.get_instance().normal_dispatch_config,
+                **npu_quantization_opts,
+            )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
             num_recv_tokens_per_expert,
             num_tokens_per_rank=num_tokens_per_rank,
@@ -837,30 +859,31 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
         npu_mxfp_quantization_opts = self._get_npu_mxfp_quantization_kwargs(buffer)
-        packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
-            buffer.low_latency_dispatch(
-                hidden_states,
-                topk_ids,
-                self.num_max_dispatch_tokens_per_rank,
-                self.num_experts,
-                use_fp8=self.use_fp8,
-                **npu_mxfp_quantization_opts,
-                **(
-                    dict(topk_weights=topk_weights)
-                    if _is_npu and not _use_zbal
-                    else dict()
-                ),
-                **(dict(use_nvfp4=True) if self.use_nvfp4 else dict()),
-                **(
-                    dict(x_global_scale=input_global_scale)
-                    if input_global_scale is not None
-                    else dict()
-                ),
-                async_finish=not self.return_recv_hook,
-                return_recv_hook=self.return_recv_hook,
-                **fp8_deepgemm_scale_opts,
+        with self._dispatch_quantization_context():
+            packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
+                buffer.low_latency_dispatch(
+                    hidden_states,
+                    topk_ids,
+                    self.num_max_dispatch_tokens_per_rank,
+                    self.num_experts,
+                    use_fp8=self.use_fp8,
+                    **npu_mxfp_quantization_opts,
+                    **(
+                        dict(topk_weights=topk_weights)
+                        if _is_npu and not _use_zbal
+                        else dict()
+                    ),
+                    **(dict(use_nvfp4=True) if self.use_nvfp4 else dict()),
+                    **(
+                        dict(x_global_scale=input_global_scale)
+                        if input_global_scale is not None
+                        else dict()
+                    ),
+                    async_finish=not self.return_recv_hook,
+                    return_recv_hook=self.return_recv_hook,
+                    **fp8_deepgemm_scale_opts,
+                )
             )
-        )
         return packed_recv_hidden, self.packed_recv_count, event, hook
 
     def _get_npu_mxfp_quantization_kwargs(self, buffer: Buffer) -> dict:

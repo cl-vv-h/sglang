@@ -169,6 +169,7 @@ if [ "$PRINT_COMMAND" = 1 ]; then
   printf '# DeepEP: LL_capacity=%s normal_rounds=%s normal_tokens_per_round=%s\n' \
     "${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}" \
     "${DEEPEP_NORMAL_LONG_SEQ_ROUND:-72}" "${DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS:-1024}"
+  printf '# DEEP_NORMAL_MODE_USE_INT8_QUANT=%s\n' "${DEEP_NORMAL_MODE_USE_INT8_QUANT:-0}"
   printf 'python3 -m sglang.launch_server '
   printf '%q ' "${SERVER_ARGS[@]}"
   printf '\n'
@@ -224,7 +225,9 @@ export HCCL_OP_EXPANSION_MODE=AIV
 export HCCL_SOCKET_IFNAME="$NETWORK_IFACE"
 export GLOO_SOCKET_IFNAME="$NETWORK_IFACE"
 export TRANSFORMERS_VERBOSITY=error
-export DEEP_NORMAL_MODE_USE_INT8_QUANT=1
+# MXFP8 experts quantize BF16 dispatch output into block-scaled activations.
+# The legacy INT8 fallback would instead produce incompatible per-token scales.
+export DEEP_NORMAL_MODE_USE_INT8_QUANT="${DEEP_NORMAL_MODE_USE_INT8_QUANT:-0}"
 export DEEPEP_NORMAL_LONG_SEQ_ROUND="${DEEPEP_NORMAL_LONG_SEQ_ROUND:-72}"
 export DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS="${DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS:-1024}"
 export DEEPEP_NORMAL_COMBINE_ENABLE_LONG_SEQ=1
@@ -250,6 +253,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 printf 'Starting node=%s ip=%s: MODE=%s TP=%s local_TP=%s ATTN_DP=%s ATTN_TP=%s GRAPH=%s OVERLAP=%s SPS_PROFILE=%s LOG_FILE=%s\n' \
   "$NODE_RANK" "$NODE_IP" "$MODE" "$TP_SIZE" "$LOCAL_TP_SIZE" "$ATTN_DP_SIZE" "$ATTN_TP_SIZE" "$GRAPH" "$OVERLAP" "$SPS_PROFILE" "$LOG_FILE"
 printf 'Rendezvous=%s:%s interface=%s\n' "$MASTER_ADDR" "$DIST_PORT" "$NETWORK_IFACE"
+printf 'DEEP_NORMAL_MODE_USE_INT8_QUANT=%s\n' "$DEEP_NORMAL_MODE_USE_INT8_QUANT"
 printf 'Command: python3 -m sglang.launch_server '
 printf '%q ' "${SERVER_ARGS[@]}"
 printf '\n'

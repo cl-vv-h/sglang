@@ -79,3 +79,23 @@ export MASTER_ADDR=141.61.45.113
 node 0 在 `NODE0_IP` 对应主机运行，node 1 在 `NODE1_IP` 对应主机运行。
 请查看两台日志中的**第一个 traceback**。只有 `kill_process_tree` 清理日志不能定位根因。
 已有成本表需要匹配 A5、TP16、Attention DP4 和实际图配置。
+
+## MXFP8 专家权重与 DeepEP 的量化格式
+
+A5 脚本默认 `DEEP_NORMAL_MODE_USE_INT8_QUANT=0`。本分支的 MXFP8 MoE 使用
+BF16 dispatch，再在 GMM1 前通过 `npu_dynamic_mx_quant` 生成 FP8 激活和 E8M0
+块 scale。INT8 dispatch 生成的逐 token scale `[M]` 不满足融合 GMM1 的
+三维块 scale `[M, ceil(K/64), 2]` 契约，不能靠 unsqueeze 或 reshape 转换。
+
+运行时会在 NPU 的 BF16 dispatch 调用期间屏蔽旧 INT8 环境变量，并在返回或异常时
+恢复原值，覆盖 normal prefill 和 low-latency verify/draft。需要 INT8 dispatch
+的层保留原行为。已经生成的二维 MX 块 scale 会作为 view 转成配对三维布局；
+不符合量化格式的输入会在进入 CANN 前报出明确错误。
+
+使用自定义旧脚本时，请删除其中固定的 `export DEEP_NORMAL_MODE_USE_INT8_QUANT=1`，
+并在两台启动前设置 `export DEEP_NORMAL_MODE_USE_INT8_QUANT=0`。脚本后面的固定赋值
+会覆盖命令行前缀的设置。此修复保留图、overlap 和 Attention DP，无需新增 kernel。
+
+接口依据：
+- [DeepEP 量化模式及旧环境变量回退](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md#quantization-modes-in-normal-dispatch)
+- [torch_npu 融合 GMM/SwiGLU/Quant 接口](https://github.com/Ascend/op-plugin/blob/master/docs/zh/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul_swiglu_quant_v2.md)

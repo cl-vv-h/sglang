@@ -1191,6 +1191,19 @@ class NPUMXFP8MoEMethod(_NPUMoEMethodBase):
         if pertoken_scale is None:
             hidden_states, pertoken_scale = self.hidden_states_quantizer(hidden_states)
 
+        # MX block scales describe pairs of 32-element blocks. A per-token
+        # INT8/FP8 scale [M] cannot be reshaped into this format: its payload
+        # uses a different quantization scheme as well.
+        pertoken_scale = _pair_pack_mxfp_act_scale(pertoken_scale)
+        if hidden_states.dtype != torch.float8_e4m3fn or pertoken_scale.ndim != 3:
+            raise ValueError(
+                "MXFP8 MoE requires float8_e4m3fn activations with 3D E8M0 "
+                "block scales, but got "
+                f"dtype={hidden_states.dtype}, scale_shape={tuple(pertoken_scale.shape)}. "
+                "Use BF16 DeepEP dispatch followed by npu_dynamic_mx_quant; "
+                "DEEP_NORMAL_MODE_USE_INT8_QUANT=1 must not quantize this layer."
+            )
+
         e8m0_dtype = _require_e8m0_dtype()
         return self.matmul.forward(
             quant_info,
