@@ -99,3 +99,33 @@ BF16 dispatch，再在 GMM1 前通过 `npu_dynamic_mx_quant` 生成 FP8 激活�
 接口依据：
 - [DeepEP 量化模式及旧环境变量回退](https://github.com/sgl-project/sgl-kernel-npu/blob/main/python/deep_ep/README.md#quantization-modes-in-normal-dispatch)
 - [torch_npu 融合 GMM/SwiGLU/Quant 接口](https://github.com/Ascend/op-plugin/blob/master/docs/zh/custom_APIs/torch_npu/torch_npu-npu_grouped_matmul_swiglu_quant_v2.md)
+
+## A5 动态窗口调度的 Triton 编译错误
+
+若报错位于 `dspark_schedule.py` 的 `_schedule_topk_selected_extra_kernel`，包含
+`failed to legalize unresolved materialization` / `ConvertTritonIRToLinalgIR`，
+失败发生在动态窗口的候选 token 选择阶段。部分 A5 Triton-Ascend 版本无法转换
+该 CUDA kernel 的循环向量归约；强制解除 AutoBlockify 黑名单不能证明计算正确。
+
+本分支在识别 `confidence.device.type == "npu"` 后使用 NPU 原生 PyTorch 调度：
+
+1. FP32 `cumprod` 生成各请求的前缀存活概率。
+2. `topk` 只确定预算边界的概率阈值。
+3. 高于阈值的候选先入选；等于阈值的候选按“位置优先、请求编号其次”做 `cumsum`，
+   仅填满剩余预算。这样不依赖 `topk` 对相同值的返回顺序。
+4. 固定形状归约得到每个请求的验证长度，并应用原来的最小/最大长度限制。
+
+调度不读取设备 Tensor 的标量或列表，不使用 FP64 排序、动态布尔索引或原子 scatter。
+CUDA 和 CPU 保持原有 dispatch。服务的图、overlap、Attention DP 设置保持不变；
+这不是通过关闭 compact 来绕开问题，也无需新增 sgl-kernel-npu 算子。
+
+CPU 对照测试覆盖并列值、零概率、不同预算、截断长度和非连续输入。另附 A5 实机
+capture/replay 测试，验证更新 confidence 后图输出也更新：
+
+```bash
+PYTHONPATH=python python -m pytest -q \
+  test/registered/unit/spec/test_dspark_npu_schedule.py
+```
+
+无 NPU 的开发环境会跳过两个实机图测试，CPU 对照通过不等于 A5 图实测通过。
+更新分支后请重启两台服务；需要重新测量调度耗时与性能后再判断收益。

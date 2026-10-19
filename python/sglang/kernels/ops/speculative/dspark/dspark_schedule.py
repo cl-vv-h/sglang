@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 class ScheduleVerifyLensTopk:
     @classmethod
     def execute(cls, *args, **kwargs) -> torch.Tensor:
+        # NPU deployments can alias is_cuda to True. Route by the actual device
+        # before the shared CUDA predicate to avoid the CUDA Triton rank kernel.
+        confidence = kwargs.get("confidence")
+        if confidence is not None and confidence.device.type == "npu":
+            return cls.npu(*args, **kwargs)
         if inputs_on_cuda(*args, **kwargs):
             return cls.triton(*args, **kwargs)
         return cls.torch(*args, **kwargs)
@@ -32,6 +37,18 @@ class ScheduleVerifyLensTopk:
         cfg: DSparkScheduleConfig,
     ) -> torch.Tensor:
         return schedule_verify_lens_topk(confidence=confidence, budget=budget, cfg=cfg)
+
+    @classmethod
+    def npu(
+        cls,
+        *,
+        confidence: torch.Tensor,
+        budget: int,
+        cfg: DSparkScheduleConfig,
+    ) -> torch.Tensor:
+        return schedule_verify_lens_topk_npu(
+            confidence=confidence, budget=budget, cfg=cfg
+        )
 
     @classmethod
     def triton(
@@ -113,6 +130,50 @@ def schedule_verify_lens_topk_from_survival(
     lower_bound = max(cfg.min_verify_len, 1)
     verify_lens = torch.clamp(verify_lens, min=lower_bound, max=max_len)
     return verify_lens.to(torch.int32)
+
+
+def schedule_verify_lens_topk_npu(
+    *,
+    confidence: torch.Tensor,
+    budget: int,
+    cfg: DSparkScheduleConfig,
+) -> torch.Tensor:
+    """Device-only top-k with deterministic (probability, position, request) ties.
+
+    Ascend's Triton compiler cannot lower the CUDA rank kernel's loop-carried
+    vector reduction on some A5 builds. Native NPU ops avoid that conversion,
+    FP64 sorting, atomic scatter, and host reads of tensor values. All temporary
+    shapes depend only on the input shape and the host budget, so this path can
+    also be captured in an NPU graph.
+    """
+    num_requests, gamma = confidence.shape
+    max_len = cfg.resolved_max_verify_len()
+    cols = min(max_len, gamma)
+    lower_bound = max(cfg.min_verify_len, 1)
+    min_lens = torch.full(
+        (num_requests,), cfg.min_verify_len, dtype=torch.int32, device=confidence.device
+    )
+    if budget <= 0 or num_requests == 0 or cols == 0:
+        return min_lens.clamp(min=lower_bound, max=max_len)
+
+    # Position-major order implements the reference's two tie breakers:
+    # earlier draft position first, then smaller request index.
+    scores = compute_sort_survival(confidence)[:, :cols].T.reshape(-1)
+    valid = scores >= cfg.survival_eps
+    take = min(int(budget), scores.numel())
+    if take == scores.numel():
+        selected = valid
+    else:
+        masked_scores = scores.masked_fill(~valid, float("-inf"))
+        threshold = torch.topk(masked_scores, take, sorted=False).values.min()
+        higher = valid & (scores > threshold)
+        tied = valid & (scores == threshold)
+        tie_rank = torch.cumsum(tied.to(torch.int32), dim=0, dtype=torch.int32)
+        remaining = take - higher.sum(dtype=torch.int32)
+        selected = higher | (tied & (tie_rank <= remaining))
+
+    extra = selected.reshape(cols, num_requests).sum(dim=0, dtype=torch.int32)
+    return (min_lens + extra).clamp(min=lower_bound, max=max_len)
 
 
 def _value_independent_descending_order(
