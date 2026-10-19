@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# Ascend A5 two nodes, 16 NPUs each. Global TP32 / Attention DP4 / Attention TP8.
+# Ascend A5 two nodes, 8 NPUs each. Global TP16 / Attention DP4 / Attention TP4.
 # Node 0 (141.61.45.118): bash launch_glm52_dspark_compact_dp_a5_2nodes.sh 0
 # Node 1 (141.61.45.124): bash launch_glm52_dspark_compact_dp_a5_2nodes.sh 1
 # Use the same code, weights, SPS table and parallel settings on both nodes.
@@ -23,7 +23,7 @@ MODE="${MODE:-dspark}"                 # dspark / target-only
 GRAPH="${GRAPH:-1}"                     # 0=eager; 1=NPU graph
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8030}"
-TP_SIZE="${TP_SIZE:-32}"
+TP_SIZE="${TP_SIZE:-16}"
 ATTN_DP_SIZE="${ATTN_DP_SIZE:-4}"
 OVERLAP="${OVERLAP:-1}"
 DEEPEP_MODE="${DEEPEP_MODE:-auto}"
@@ -44,7 +44,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SGLANG_ROOT="${SGLANG_ROOT:-$(cd -- "${SCRIPT_DIR}/../../.." && pwd)}"
 TARGET_MODEL="${TARGET_MODEL:-/home/weights/GLM-5.2-w8a8/}"
 DRAFT_MODEL="${DRAFT_MODEL:-/home/weights/GLM-5.2-DSpark-NPU-0805/}"
-SPS_TABLE="${SPS_TABLE-/home/sps_npu_a5_tp32_adp4.json}"
+SPS_TABLE="${SPS_TABLE-/home/sps_npu_a5_tp16_adp4.json}"
 SPS_PROFILE="${SPS_PROFILE:-0}"
 RAGGED_VERIFY_MODE="${RAGGED_VERIFY_MODE:-compact}"
 # 调试日志会增加同步开销，默认关闭；需要验证窗口变化时设为 1。
@@ -258,4 +258,10 @@ printf 'Communication: DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n
 printf 'DeepEP: LL_capacity=%s normal_rounds=%s normal_tokens_per_round=%s\n' \
   "${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}" \
   "$DEEPEP_NORMAL_LONG_SEQ_ROUND" "$DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS"
-exec python3 -m sglang.launch_server "${SERVER_ARGS[@]}"
+# Keep bash as the parent of both Python and tee. SGLang cleans up Python's
+# descendants in its finally block; exec would make tee a Python child and
+# could kill the logger before an uncaught exception prints its traceback.
+SERVER_STATUS=0
+python3 -u -m sglang.launch_server "${SERVER_ARGS[@]}" || SERVER_STATUS=$?
+printf 'Server exited: status=%s LOG_FILE=%s\n' "$SERVER_STATUS" "$LOG_FILE" >&2
+exit "$SERVER_STATUS"

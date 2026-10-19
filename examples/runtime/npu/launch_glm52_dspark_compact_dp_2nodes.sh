@@ -258,4 +258,10 @@ printf 'Communication: DEEPEP_MODE=%s HCCL_BUFFSIZE=%s DEEPEP_HCCL_BUFFSIZE=%s\n
 printf 'DeepEP: LL_capacity=%s normal_rounds=%s normal_tokens_per_round=%s\n' \
   "${SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK:-128}" \
   "$DEEPEP_NORMAL_LONG_SEQ_ROUND" "$DEEPEP_NORMAL_LONG_SEQ_PER_ROUND_TOKENS"
-exec python3 -m sglang.launch_server "${SERVER_ARGS[@]}"
+# Keep bash as the parent of both Python and tee. SGLang cleans up Python's
+# descendants in its finally block; exec would make tee a Python child and
+# could kill the logger before an uncaught exception prints its traceback.
+SERVER_STATUS=0
+python3 -u -m sglang.launch_server "${SERVER_ARGS[@]}" || SERVER_STATUS=$?
+printf 'Server exited: status=%s LOG_FILE=%s\n' "$SERVER_STATUS" "$LOG_FILE" >&2
+exit "$SERVER_STATUS"
