@@ -114,3 +114,5 @@ curl -fsS http://61.47.19.70:8030/generate \
 
 遇到相同 HCCL/allocator 报错时，两台都设置 `SGLANG_NPU_DEBUG_GRAPH_CAPTURE=1`，收集
 两个节点的首个异常和 `[NPU-GRAPH]` 阶段信息。不要只保留进程退出时的同步错误。
+
+A5 双机（`141.61.45.118/124`，网卡 `data0.3001`）见 [A5 启动说明](README.glm52_compact_dp_a5_2nodes.md)。
