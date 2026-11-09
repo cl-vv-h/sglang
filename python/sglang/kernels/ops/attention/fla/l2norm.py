@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from sglang.kernels.ops.attention.fla.utils import input_guard
+from sglang.srt.utils import is_npu
 
 BT_LIST = [8, 16, 32, 64, 128]
 
@@ -120,6 +121,10 @@ def l2norm_fwd(
         )
 
     return y.view(x_shape_og)
+
+
+if is_npu():
+    from sgl_kernel_npu.operators.norm import l2norm_fwd
 
 
 @triton.jit(do_not_specialize=["T"])

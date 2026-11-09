@@ -41,16 +41,18 @@ if _is_cuda or _is_hip:
         transfer_kv_mamba_pf_lf,
     )
 if _is_npu:
-    from sgl_kernel_npu.kvcacheio import TransferDirection
+    from sgl_kernel_npu.operators.data_move import TransferDirection
 
     try:
-        from sgl_kernel_npu.kvcacheio import transfer_mamba_state
+        from sgl_kernel_npu.operators.data_move import transfer_mamba_state
     except ImportError:
         transfer_mamba_state = None
     try:
-        from sgl_kernel_npu.kvcacheio import (
-            transfer_state_all_layer_direct_lf_pf,
-            transfer_state_per_layer_direct_pf_lf,
+        from sgl_kernel_npu.operators.data_move import (
+            transfer_kv_all_layer_direct_lf_pf as transfer_state_all_layer_direct_lf_pf,
+        )
+        from sgl_kernel_npu.operators.data_move import (
+            transfer_kv_per_layer_direct_pf_lf as transfer_state_per_layer_direct_pf_lf,
         )
     except ImportError:
         pass

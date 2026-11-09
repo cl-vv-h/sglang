@@ -788,6 +788,17 @@ def assign_req_to_token_pool_func(
             req_to_token.shape[1],
         )
         return
+    if _is_npu:
+        from sgl_kernel_npu.operators.mem_cache import cache_loc_assign
+
+        cache_loc_assign(
+            req_pool_indices,
+            req_to_token,
+            start_offset,
+            end_offset,
+            out_cache_loc.to(req_to_token.dtype),
+        )
+        return
     assign_req_to_token_pool[(batch_size,)](
         req_pool_indices,
         req_to_token,
