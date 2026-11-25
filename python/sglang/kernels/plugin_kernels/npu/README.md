@@ -40,3 +40,9 @@ strategy to admit the seed, PD transfer generation and physical slots across TP.
 A single replay returns the seed plus N−1 recurrent tokens. It is copied before
 reuse and handed to the ordinary verify path. There is no cross-round chain.
 Decline before writing; do not retry a different forward after execution.
+
+The backend votes once per step, after its own session lookup and input update,
+so a rank that cannot replay falls back together with the whole group. A rank
+must enter that vote even when it already declined locally; skipping it blocks
+the group in the all-reduce. A backend that cannot honour this must not claim
+the runner.

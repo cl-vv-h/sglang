@@ -749,13 +749,13 @@ class EagleDraftWorker(EagleDraftWorkerBase):
 
         with canary_outside_ctx:
             if can_run_decode_cuda_graph:
-                runner = self.cuda_graph_runner
-                if _is_npu and hasattr(
-                    getattr(runner, "backend", None), "execute_draft_graph"
-                ):
-                    graph_output = runner.execute(forward_batch, batch=batch)
-                else:
-                    graph_output = runner.execute(forward_batch)
+                # ``batch`` lets a draft strategy that replays its own graph
+                # outside this runner replace the whole draft loop. The stock
+                # and CUDA megakernel strategies ignore it (their loop runs
+                # inside the captured graph).
+                graph_output = self.cuda_graph_runner.execute(
+                    forward_batch, batch=batch
+                )
                 parent_list, top_scores_index, draft_tokens, draft_probs = graph_output
                 if draft_probs is not None:
                     # draft_probs is the one graph output read after the target

@@ -79,7 +79,19 @@ def install_megakernels(runner):
         return None
     if any(peer != signature for peer in ranks):
         raise RuntimeError(f"NPU megakernel preflight failed: {ranks}")
-    if binding is not None:
+    if binding is None:
+        return None
+    # A build that fails on one rank would leave the others entering TP
+    # collectives alone (SHMEM init, graph capture), so agree on the outcome
+    # before any rank returns.
+    build_error = None
+    try:
         binding.build(runner.model)
+    except Exception as exc:
+        build_error = f"{type(exc).__name__}: {exc}"
+    build_errors = [None] * dist.get_world_size(group)
+    dist.all_gather_object(build_errors, build_error, group=group)
+    if any(build_errors):
+        raise RuntimeError(f"NPU megakernel build failed: {build_errors}")
     logger.info("NPU megakernel architecture=%s role=%s mode=%s", *signature[:3])
     return binding

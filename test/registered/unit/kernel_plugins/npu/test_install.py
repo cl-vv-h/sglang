@@ -144,6 +144,14 @@ class TestInstallMegakernels(unittest.TestCase):
                 world=2,
             )
 
+    def test_build_failure_fails_every_rank(self):
+        def build(model):
+            raise RuntimeError("shmem init")
+
+        binding = NS(role="target", mode="decode_loop", build=build)
+        with self.assertRaisesRegex(RuntimeError, "build failed"):
+            self._install(self._runner(), lambda resources, cfg: binding)
+
     def test_peer_error_fails_preflight(self):
         binding = NS(role="target", mode="decode_loop", build=Mock())
 
