@@ -1182,7 +1182,7 @@ class ModelRunner:
         if self.device == "npu" and get_exec().kernel.enable_npu_megakernel:
             from sglang.srt.kernel_plugins.npu.binding import install_megakernels
 
-            self.ascend_binding = install_megakernels(self)
+            self.npu_binding = install_megakernels(self)
 
         if get_parallel().dcp_enabled and get_parallel().dcp_replicate_q_proj:
             self._prepare_replicated_q_proj()

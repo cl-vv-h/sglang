@@ -12,10 +12,10 @@ register_cpu_ci(est_time=2, stage="base-a", runner_config="cpu")
 class TestEagleLifecycle(unittest.TestCase):
     def test_nextn_binding_provides_the_draft_runtime(self):
         runtime = object()
-        binding = NS(role="nextn", draft_runtime=Mock(return_value=runtime))
-        worker = NS(draft_runner=NS(ascend_binding=binding))
+        npu_binding = NS(role="nextn", draft_runtime=Mock(return_value=runtime))
+        worker = NS(draft_runner=NS(npu_binding=npu_binding))
         self.assertIs(init_eagle_draft_runtime(draft_worker=worker), runtime)
-        binding.draft_runtime.assert_called_once_with(worker)
+        npu_binding.draft_runtime.assert_called_once_with(worker)
 
     def test_stock_and_nvidia_keep_their_strategy(self):
         worker = NS(draft_runner=NS())

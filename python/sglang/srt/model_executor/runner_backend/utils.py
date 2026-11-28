@@ -106,9 +106,9 @@ def resolve_decode_backend(
     enable_memory_saver = get_exec().features.enable_memory_saver
 
     if model_runner.device == "npu":
-        binding = getattr(model_runner, "ascend_binding", None)
-        if binding is not None:
-            backend = binding.graph_backend(cuda_graph_runner, enable_memory_saver)
+        npu_binding = getattr(model_runner, "npu_binding", None)
+        if npu_binding is not None:
+            backend = npu_binding.graph_backend(cuda_graph_runner, enable_memory_saver)
             if backend is not None:
                 return backend
 

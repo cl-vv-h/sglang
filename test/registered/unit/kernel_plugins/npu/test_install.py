@@ -55,10 +55,10 @@ class TestInstallMegakernels(unittest.TestCase):
 
     def test_agreed_binding_is_built(self):
         built = Mock()
-        binding = NS(role="target", mode="decode_loop", build=built)
+        npu_binding = NS(role="target", mode="decode_loop", build=built)
         runner = self._runner()
-        result = self._install(runner, lambda resources, cfg: binding)
-        self.assertIs(result, binding)
+        result = self._install(runner, lambda resources, cfg: npu_binding)
+        self.assertIs(result, npu_binding)
         built.assert_called_once_with(runner.model)
 
     def test_expected_decline_logs_info_without_reading_the_text(self):
@@ -130,7 +130,7 @@ class TestInstallMegakernels(unittest.TestCase):
             self._install(self._runner(), prepare)
 
     def test_peer_disagreement_fails_preflight(self):
-        binding = NS(role="target", mode="decode_loop", build=Mock())
+        npu_binding = NS(role="target", mode="decode_loop", build=Mock())
 
         def peers(signature):
             identity, error, decline = signature
@@ -140,13 +140,13 @@ class TestInstallMegakernels(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "preflight failed"):
             self._install(
                 self._runner(),
-                lambda resources, cfg: binding,
+                lambda resources, cfg: npu_binding,
                 peers=peers,
                 world=2,
             )
 
     def test_peer_error_fails_preflight(self):
-        binding = NS(role="target", mode="decode_loop", build=Mock())
+        npu_binding = NS(role="target", mode="decode_loop", build=Mock())
 
         def peers(signature):
             bad = (None, "RuntimeError: boom", None)
@@ -155,7 +155,7 @@ class TestInstallMegakernels(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "boom"):
             self._install(
                 self._runner(),
-                lambda resources, cfg: binding,
+                lambda resources, cfg: npu_binding,
                 peers=peers,
                 world=2,
             )

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def install_megakernels(runner):
     architecture = type(runner.model).__name__
     group = get_parallel().tp_group.cpu_group
-    binding = error = decline = None
+    npu_binding = error = decline = None
     signature = None
     try:
         spec = find_spec(architecture)
@@ -37,11 +37,11 @@ def install_megakernels(runner):
             if isinstance(outcome, Decline):
                 decline = outcome
             elif getattr(outcome, "role", None) is not None:
-                binding = outcome
+                npu_binding = outcome
                 signature = (
                     architecture,
-                    binding.role,
-                    binding.mode,
+                    npu_binding.role,
+                    npu_binding.mode,
                     getattr(cfg, "speculative_num_steps", None),
                     getattr(cfg, "speculative_num_draft_tokens", None),
                 )
@@ -71,6 +71,6 @@ def install_megakernels(runner):
     if any(peer != signature for peer, _, _ in ranks):
         raise RuntimeError(f"NPU megakernel preflight failed: {ranks}")
 
-    binding.build(runner.model)
+    npu_binding.build(runner.model)
     logger.info("NPU megakernel architecture=%s role=%s mode=%s", *signature[:3])
-    return binding
+    return npu_binding

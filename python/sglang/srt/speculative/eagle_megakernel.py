@@ -151,9 +151,9 @@ def init_eagle_megakernel(*, draft_worker: Any) -> Optional[EagleMegakernel]:
 def init_eagle_draft_runtime(*, draft_worker: Any) -> EagleDraftRuntime:
     """Resolve draft dispatch once and always return a strategy."""
     draft_runner = getattr(draft_worker, "draft_runner", None)
-    binding = getattr(draft_runner, "ascend_binding", None)
-    if binding is not None and binding.role == "nextn":
-        return binding.draft_runtime(draft_worker)
+    npu_binding = getattr(draft_runner, "npu_binding", None)
+    if npu_binding is not None and npu_binding.role == "nextn":
+        return npu_binding.draft_runtime(draft_worker)
     specialized = init_eagle_megakernel(draft_worker=draft_worker)
     return STOCK_EAGLE_DRAFT_RUNTIME if specialized is None else specialized
 
