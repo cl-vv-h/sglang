@@ -191,6 +191,7 @@ class EagleDraftWorker(EagleDraftWorkerBase):
     draft_runtime: eagle_megakernel.EagleDraftRuntime = (
         eagle_megakernel.STOCK_EAGLE_DRAFT_RUNTIME
     )
+    _replay_draft_megakernel: Optional[Callable] = None
 
     def __init__(
         self,
@@ -355,6 +356,9 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         # the pools and both attention backends exist, no graph is captured yet
         self.draft_runtime = eagle_megakernel.init_eagle_draft_runtime(
             draft_worker=self
+        )
+        self._replay_draft_megakernel = getattr(
+            self.draft_runtime, "replay_draft_graph", None
         )
 
     def init_cuda_graphs(self):
@@ -778,15 +782,33 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         )
 
         with canary_outside_ctx:
-            if can_run_decode_cuda_graph:
-                runner = self.cuda_graph_runner
-                if _is_npu and hasattr(
-                    getattr(runner, "backend", None), "execute_draft_graph"
-                ):
-                    graph_output = runner.execute(forward_batch, batch=batch)
-                else:
-                    graph_output = runner.execute(forward_batch)
-                parent_list, top_scores_index, draft_tokens, draft_probs = graph_output
+            runner = self.cuda_graph_runner
+            chain = None
+            if (
+                _is_npu
+                and self._replay_draft_megakernel is not None
+                and isinstance(runner, EAGLEDraftCudaGraphRunner)
+            ):
+                # Participate in TP admission even if this rank cannot use a graph.
+                shape_key = (
+                    runner.replay_shape_key(forward_batch)
+                    if can_run_decode_cuda_graph
+                    else None
+                )
+                chain = self._replay_draft_megakernel(
+                    runner=runner,
+                    batch=batch,
+                    forward_batch=forward_batch,
+                    shape_key=shape_key,
+                )
+            if chain is not None:
+                parent_list = self._topk1_parents_prealloc[: chain.shape[0]]
+                top_scores_index = self._topk1_score_indices_prealloc[: chain.shape[0]]
+                draft_tokens, draft_probs = chain, None
+            elif can_run_decode_cuda_graph:
+                parent_list, top_scores_index, draft_tokens, draft_probs = (
+                    runner.execute(forward_batch)
+                )
                 if draft_probs is not None:
                     # draft_probs is the one graph output read after the target
                     # forward rather than by it, and it points into the graph's

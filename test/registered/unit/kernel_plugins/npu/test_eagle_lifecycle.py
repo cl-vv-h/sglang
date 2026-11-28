@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sglang.srt.speculative import eagle_megakernel
 from sglang.srt.speculative.eagle_megakernel import init_eagle_draft_runtime
@@ -10,6 +10,13 @@ register_cpu_ci(est_time=2, stage="base-a", runner_config="cpu")
 
 
 class TestEagleLifecycle(unittest.TestCase):
+    def test_nextn_binding_provides_the_draft_runtime(self):
+        runtime = object()
+        binding = NS(role="nextn", draft_runtime=Mock(return_value=runtime))
+        worker = NS(draft_runner=NS(ascend_binding=binding))
+        self.assertIs(init_eagle_draft_runtime(draft_worker=worker), runtime)
+        binding.draft_runtime.assert_called_once_with(worker)
+
     def test_stock_and_nvidia_keep_their_strategy(self):
         worker = NS(draft_runner=NS())
         nvidia = object.__new__(eagle_megakernel.EagleMegakernel)

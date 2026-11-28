@@ -97,8 +97,7 @@ def resolve_decode_backend(
 ) -> BaseGraphBackend:
     """Pick a backend instance from cuda_graph_config['decode']['backend'].
 
-    NPU device returns NPUCudaGraphBackend regardless of mode (only
-    the Full-style backend is wired for NPU today).
+    NPU uses the installed decode provider or its native graph backend.
     """
     model_runner = cuda_graph_runner.model_runner
     cfg = get_exec().graph.cuda_graph_config
@@ -107,6 +106,12 @@ def resolve_decode_backend(
     enable_memory_saver = get_exec().features.enable_memory_saver
 
     if model_runner.device == "npu":
+        binding = getattr(model_runner, "ascend_binding", None)
+        if binding is not None:
+            backend = binding.graph_backend(cuda_graph_runner, enable_memory_saver)
+            if backend is not None:
+                return backend
+
         from sglang.srt.hardware_backend.npu.graph_runner.npu_cudagraph_backend import (
             NPUCudaGraphBackend,
         )

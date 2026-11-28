@@ -373,7 +373,9 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
             return self._pad_to_bucket(int(max_batch_size), self.capture_bs)
         return self._pad_to_bucket(forward_batch.batch_size, self.capture_bs)
 
-    def _replay_shape_key(self, forward_batch, bs):
+    def replay_shape_key(self, forward_batch: ForwardBatch, bs: Optional[int] = None):
+        if bs is None:
+            bs = self._padded_replay_bs(forward_batch)
         return self._make_graph_key(
             bs,
             variant_label=self._sampling_variant(forward_batch),
@@ -671,28 +673,14 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
     # -----------------------------------------------------------------
     # Replay
     # -----------------------------------------------------------------
-    def execute(self, forward_batch: ForwardBatch, *, batch=None):
-        replay_bs = self._padded_replay_bs(forward_batch)
-        shape_key = self._replay_shape_key(forward_batch, replay_bs)
-        if batch is not None:
-            worker = self.eagle_worker
-            chain = worker.draft_runtime.propose_chain(
-                batch, forward_batch, shape_key
-            )
-            if chain is not None:
-                return (
-                    worker._topk1_parents_prealloc[:1],
-                    worker._topk1_score_indices_prealloc[:1],
-                    chain,
-                    None,
-                )
+    def execute(self, forward_batch: ForwardBatch):
         assert forward_batch.out_cache_loc is not None
         self.deepep_adapter.replay()
         buffers = self.buffers
 
         raw_bs = forward_batch.batch_size
         raw_num_token = raw_bs * self.captured_req_width
-        bs = replay_bs
+        bs = self._padded_replay_bs(forward_batch)
 
         if bs != raw_bs:
             buffers.seq_lens.fill_(self.seq_len_fill_value)
@@ -862,8 +850,7 @@ class EAGLEDraftCudaGraphRunner(DecodeCudaGraphRunner):
         self.raw_bs = raw_bs
         self.bs = bs
 
-        # Replay via backend. shape_key was chosen before propose_chain so the
-        # draft Session and this NPU graph are the same capture.
+        shape_key = self.replay_shape_key(forward_batch, bs)
         with device_timer_ctx(self.model_runner.device_timer, "eagle_draft"):
             out = self._replay_graph(shape_key, forward_batch)
         if self.buffers.dsa_seed_topk is not None:

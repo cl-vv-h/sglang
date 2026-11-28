@@ -133,8 +133,9 @@ class TestInstallMegakernels(unittest.TestCase):
         binding = NS(role="target", mode="decode_loop", build=Mock())
 
         def peers(signature):
-            other = (signature[0], "nextn", *signature[2:])
-            return [signature, other]
+            identity, error, decline = signature
+            other = (identity[0], "nextn", *identity[2:])
+            return [signature, (other, error, decline)]
 
         with self.assertRaisesRegex(RuntimeError, "preflight failed"):
             self._install(
@@ -148,7 +149,7 @@ class TestInstallMegakernels(unittest.TestCase):
         binding = NS(role="target", mode="decode_loop", build=Mock())
 
         def peers(signature):
-            bad = (*signature[:5], "RuntimeError: boom", signature[6])
+            bad = (None, "RuntimeError: boom", None)
             return [signature, bad]
 
         with self.assertRaisesRegex(RuntimeError, "boom"):

@@ -11,23 +11,12 @@ from sglang.srt.runtime_context import get_parallel
 logger = logging.getLogger(__name__)
 
 
-def _decline_text(reason):
-    return reason.reason if isinstance(reason, Decline) else reason
-
-
-def _unexpected_decline(reason):
-    if isinstance(reason, Decline):
-        return not reason.expected
-    return True
-
-
 def install_megakernels(runner):
     architecture = type(runner.model).__name__
     group = get_parallel().tp_group.cpu_group
     binding = error = decline = None
-    cfg = None
+    signature = None
     try:
-        cfg = resolved_view(runner.server_args)
         spec = find_spec(architecture)
         if spec is None:
             decline = f"no megakernel spec for {architecture}"
@@ -37,6 +26,7 @@ def install_megakernels(runner):
                 f"draft_worker={runner.is_draft_worker}"
             )
         else:
+            cfg = resolved_view(runner.server_args)
             resources = PreparationView(
                 model=runner.model,
                 token_to_kv_pool=runner.token_to_kv_pool,
@@ -46,40 +36,41 @@ def install_megakernels(runner):
             outcome = spec.prepare(resources, cfg)
             if isinstance(outcome, Decline):
                 decline = outcome
-            elif outcome is None:
-                decline = None
-            else:
+            elif getattr(outcome, "role", None) is not None:
                 binding = outcome
+                signature = (
+                    architecture,
+                    binding.role,
+                    binding.mode,
+                    getattr(cfg, "speculative_num_steps", None),
+                    getattr(cfg, "speculative_num_draft_tokens", None),
+                )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
-    signature = (
-        architecture,
-        getattr(binding, "role", None),
-        getattr(binding, "mode", None),
-        getattr(cfg, "speculative_num_steps", None),
-        getattr(cfg, "speculative_num_draft_tokens", None),
-        error,
-        decline,
-    )
+
     ranks = [None] * dist.get_world_size(group)
-    dist.all_gather_object(ranks, signature, group=group)
-    if any(peer[5] for peer in ranks):
+    dist.all_gather_object(ranks, (signature, error, decline), group=group)
+    if any(peer_error for _, peer_error, _ in ranks):
         raise RuntimeError(f"NPU megakernel preflight failed: {ranks}")
-    if any(peer[1] is None for peer in ranks):
-        reasons = [peer[6] for peer in ranks]
-        # Decline.expected is an explicit off switch. Any other reason means
-        # the enabled plugin did not install.
-        unexpected = any(_unexpected_decline(reason) for reason in reasons)
-        log = logger.warning if unexpected else logger.info
+
+    refusals = [reason for peer, _, reason in ranks if peer is None]
+    if refusals:
+        expected = all(
+            isinstance(reason, Decline) and reason.expected for reason in refusals
+        )
+        log = logger.info if expected else logger.warning
         log(
             "NPU megakernel declined %s: %s",
             architecture,
-            [_decline_text(reason) for reason in reasons],
+            [
+                reason.reason if isinstance(reason, Decline) else reason
+                for reason in refusals
+            ],
         )
         return None
-    if any(peer != signature for peer in ranks):
+    if any(peer != signature for peer, _, _ in ranks):
         raise RuntimeError(f"NPU megakernel preflight failed: {ranks}")
-    if binding is not None:
-        binding.build(runner.model)
+
+    binding.build(runner.model)
     logger.info("NPU megakernel architecture=%s role=%s mode=%s", *signature[:3])
     return binding

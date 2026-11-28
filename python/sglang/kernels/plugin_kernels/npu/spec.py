@@ -1,7 +1,7 @@
-"""Lazy architecture registry for NPU providers discovered by sglang.srt.plugins."""
+"""NPU megakernel provider contract and opt-in discovery."""
 
 from dataclasses import dataclass
-from importlib import import_module
+from importlib.metadata import entry_points
 from typing import Any, Callable, Literal, Optional, Protocol, Union
 
 
@@ -13,22 +13,8 @@ class PreparationView:
 
 
 @dataclass(frozen=True)
-class DraftLoopIO:
-    forward_batch: Any
-    input_ids: Any
-    positions: Any
-    previous_hidden_states: Any
-    per_step_out_cache_loc: Any
-
-
-@dataclass(frozen=True)
 class Decline:
-    """``prepare`` returns this when it refuses to install.
-
-    ``expected`` marks an intentional off switch. The host logs that at info
-    and any other refusal at warning. The reason is this object, not an
-    attribute of the prepare function and not a phrase in the text.
-    """
+    """A refusal from prepare. Expected refusals are logged at info level."""
 
     reason: str
     expected: bool = False
@@ -37,49 +23,35 @@ class Decline:
 class NpuBinding(Protocol):
     role: str
     mode: str
-    pd_decode: bool
-
-    def hit(self, route: str) -> None: ...
 
     def build(self, model: Any) -> None: ...
     def graph_backend(self, runner: Any, enable_memory_saver: bool) -> Any: ...
-    def supports_decode(
-        self, batch: Any, forward_batch: Any, hot_token_id: Any
-    ) -> bool: ...
+    def draft_runtime(self, worker: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
 class MegakernelSpec:
     role: Literal["target", "nextn"]
-    prepare: Callable[
-        [PreparationView, Any], Union[NpuBinding, Decline, None]
-    ]
+    prepare: Callable[[PreparationView, Any], Union[NpuBinding, Decline, None]]
 
 
-_registry: dict[str, str] = {}
+ENTRY_POINT_GROUP = "sglang.srt.npu_megakernels"
 
 
-def register(*, architecture: str, path: str) -> None:
-    module, separator, attr = path.partition(":")
-    if not architecture or not module or not separator or not attr:
-        raise ValueError(
-            f"Invalid NPU megakernel registration: {architecture!r}, {path!r}"
-        )
-    if architecture in _registry and _registry[architecture] != path:
-        raise ValueError(f"Conflicting NPU megakernel registration for {architecture}")
-    _registry[architecture] = path
-
-
-def find_spec(architecture: str):
-    if not _registry:
+def find_spec(architecture: str) -> Optional[MegakernelSpec]:
+    providers = entry_points(group=ENTRY_POINT_GROUP)
+    if not providers:
         raise RuntimeError(
-            "No NPU megakernel registered. Install a provider exposing sglang.srt.plugins."
+            "No NPU megakernel provider installed. Install a provider exposing "
+            f"{ENTRY_POINT_GROUP}."
         )
-    path = _registry.get(architecture)
-    if path is None:
+    matches = providers.select(name=architecture)
+    if not matches:
         return None
-    module, attr = path.split(":")
-    spec = getattr(import_module(module), attr)
+    if len(matches) > 1:
+        raise RuntimeError(f"Conflicting NPU megakernel providers for {architecture}")
+    provider = next(iter(matches))
+    spec = provider.load()
     if not isinstance(spec, MegakernelSpec):
-        raise TypeError(f"Invalid NPU megakernel spec at {path}")
+        raise TypeError(f"Invalid NPU megakernel spec at {provider.value}")
     return spec
